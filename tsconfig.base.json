@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "noUncheckedIndexedAccess": true,
+    "baseUrl": ".",
+    "paths": {
+      "@agentrewind/core": ["packages/core/src/index.ts"],
+      "@agentrewind/codec-anthropic": ["packages/codec-anthropic/src/index.ts"],
+      "@agentrewind/codec-openai": ["packages/codec-openai/src/index.ts"],
+      "@agentrewind/codec-openrouter": ["packages/codec-openrouter/src/index.ts"],
+      "@agentrewind/test": ["packages/test/src/index.ts"],
+      "agentrewind": ["packages/agentrewind/src/index.ts"]
+    }
+  },
+  "include": ["packages/**/*.ts", "vitest.config.ts", "examples/**/*.ts"]
+}

@@ -1,0 +1,13 @@
+node_modules/
+dist/
+packages/*/dist/
+packages/*/.tmp-quickstart-*/
+.rewind/
+.npm-pack/
+*.tgz
+*.log
+.env
+.env.*
+!.env.example
+coverage/
+.DS_Store

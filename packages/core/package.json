@@ -1,0 +1,35 @@
+{
+  "name": "@agentrewind/core",
+  "version": "0.1.0",
+  "description": "Dependency-free AgentRewind core runtime for deterministic LLM-agent record, replay, and fork.",
+  "type": "module",
+  "keywords": [
+    "llm",
+    "agents",
+    "replay",
+    "determinism",
+    "testing"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --target node20 --tsconfig ../../tsconfig.base.json",
+    "prepack": "pnpm build",
+    "test": "vitest run --root ../.. packages/core/test/core.test.ts"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

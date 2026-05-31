@@ -1,0 +1,168 @@
+# Operational Guide
+
+This guide covers the habits that make AgentRewind recordings useful in real
+projects.
+
+## Name Boundary Calls
+
+Pass a stable `site` for every model call that represents a meaningful decision:
+
+```ts
+await ctx.model.create(request, { site: "classify-ticket" });
+await ctx.model.stream(request, { site: "draft-reply-stream" });
+await ctx.tools.lookupCustomer({ id: customerId });
+```
+
+Tool names already act as call sites. Model `site` names help distinguish
+multiple calls with similar requests and make CLI output readable.
+
+The CLI can target those names directly:
+
+```sh
+agentrewind context .rewind/support-bot --site classify-ticket
+agentrewind diff .rewind/support-bot --from-site draft-reply --to-site final-reply
+```
+
+## Route Entropy Through `ctx`
+
+If a value can affect prompts, tool args, or branching, draw it through
+AgentRewind:
+
+```ts
+const requestId = ctx.uuid();
+const receivedAt = ctx.clock();
+const sample = ctx.random();
+```
+
+Strict replay will serve the recorded values. Ambient `Date.now()`,
+`Math.random()`, and `crypto.randomUUID()` are not intercepted.
+
+## Model External I/O As Tools
+
+Strict replay only controls model calls, tool calls, and `ctx` entropy. If your
+harness reads a database, calls an HTTP API, or writes a file directly, that work
+will happen again during replay. Wrap those operations as tools when their
+inputs or outputs affect the agent trajectory.
+
+## Keep Boundaries JSON-Shaped
+
+Model requests, normalized model responses, tool arguments, tool results, and
+tool stream chunks must be JSON-compatible after codec normalization or tool
+serialization. Use `null`, strings, finite numbers, booleans, arrays, and plain
+objects. Convert runtime objects such as `Date`, `Map`, classes, `Buffer`,
+`BigInt`, `NaN`, `Infinity`, and functions before they reach AgentRewind.
+
+For tool-specific runtime values, pass `toolSerializers` with `serialize()` and
+`deserialize()` functions. For provider SDK objects, keep the conversion inside
+the provider codec's `normalizeRequest()` and `normalizeResponse()`.
+
+## Pick The Right Replay Mode
+
+- `strict`: default. No live model/tool calls on replay. Use in tests and
+  debugging.
+- `warn`: prints drift data, then fails. Use when investigating a mismatch.
+- `passthrough`: calls live model/tool handlers on drift. Use for manual
+  exploration, not deterministic tests.
+
+## Make Drift Actionable
+
+Use `explainRewindError()` anywhere drift might appear in CI or logs:
+
+```ts
+import { AgentRewind, explainRewindError } from "agentrewind";
+
+try {
+  await AgentRewind.replayRun(".rewind/support-bot", { codec }, harness);
+} catch (error) {
+  console.error(explainRewindError(error, {
+    sessionPath: ".rewind/support-bot"
+  }));
+  throw error;
+}
+```
+
+The formatted message summarizes expected vs actual boundaries and includes the
+next CLI commands to run. When a named model call drifted, it points to
+`agentrewind context <session> --site <name>` so the next command uses the same
+logical site name as your harness. `@agentrewind/test` uses the same formatter
+when it turns drift into an assertion failure.
+
+For manual investigation, start with the readable timeline:
+
+```sh
+agentrewind inspect .rewind/support-bot
+```
+
+For scripts and CI diagnostics, use the same data as JSON:
+
+```sh
+agentrewind inspect .rewind/support-bot --json
+```
+
+## Redaction And Sharing
+
+Redaction is enabled by default. AgentRewind stores redacted events and keeps a
+local encrypted vault so replay can restore secrets on the same machine.
+
+Use `pack` before sharing a session:
+
+```sh
+agentrewind pack .rewind/support-bot support-bot.rewind
+```
+
+The `.rewind` bundle excludes the vault. The recipient can inspect and replay
+the redacted trajectory, but original secret values are not included.
+
+## CI Pattern
+
+Record a golden trajectory locally, commit or upload the safe packed artifact
+according to your project policy, and assert it in tests:
+
+```ts
+import { fromSession } from "@agentrewind/test";
+import { openaiChatCodec } from "@agentrewind/codec-openai";
+
+test("support router trajectory is stable", async () => {
+  const session = await fromSession("support-router", {
+    store: "fixtures",
+    codec: openaiChatCodec()
+  });
+
+  expect(session.replay.events().some((event) => event.kind === "model_call")).toBe(true);
+  await session.assertReplay(supportRouterHarness);
+});
+```
+
+For the common one-line case, use `assertReplay("latest", { store, codec },
+harness)`. It accepts the same selectors as the runtime replay APIs and turns
+drift into a Node `AssertionError` with AgentRewind's readable explanation.
+
+Run the full workspace checks before publishing:
+
+```sh
+pnpm check
+```
+
+## Forking Workflow
+
+Use fork when you want to replay everything before a decision and try a live
+tail with new prompt or model settings.
+
+```ts
+const replay = await AgentRewind.replay(".rewind/support-bot", {
+  codec
+});
+
+const fork = await replay.fork({
+  atStep: 3,
+  harness,
+  model,
+  overrides: {
+    system: "Prioritize escalation accuracy over brevity."
+  },
+  goal: (trace) => trace.reached("sendEscalation")
+});
+```
+
+`fork.tokensSpent` only counts live tail model usage. Tail events are written to
+a child session whose metadata points back to the parent recording.

@@ -1,0 +1,44 @@
+{
+  "name": "@agentrewind/codec-openrouter",
+  "version": "0.1.0",
+  "description": "OpenRouter Chat Completions codec and OpenAI SDK client helpers for AgentRewind.",
+  "type": "module",
+  "keywords": [
+    "openrouter",
+    "chat-completions",
+    "llm",
+    "agents",
+    "replay"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --target node20 --tsconfig ../../tsconfig.base.json",
+    "prepack": "pnpm build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "openai": "*"
+  },
+  "dependencies": {
+    "@agentrewind/core": "workspace:*",
+    "@agentrewind/codec-openai": "workspace:*"
+  },
+  "devDependencies": {
+    "openai": "^6.39.1"
+  }
+}

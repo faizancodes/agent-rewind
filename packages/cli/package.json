@@ -1,0 +1,42 @@
+{
+  "name": "@agentrewind/cli",
+  "version": "0.1.0",
+  "description": "AgentRewind command-line tools for inspecting, diffing, packing, and unpacking sessions.",
+  "type": "module",
+  "keywords": [
+    "llm",
+    "agents",
+    "replay",
+    "cli",
+    "debugging"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "agentrewind": "./dist/index.js",
+    "arw": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --target node20 --tsconfig ../../tsconfig.base.json",
+    "prepack": "pnpm build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@agentrewind/core": "workspace:*",
+    "commander": "^15.0.0"
+  }
+}

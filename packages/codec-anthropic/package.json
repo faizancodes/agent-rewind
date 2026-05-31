@@ -1,0 +1,43 @@
+{
+  "name": "@agentrewind/codec-anthropic",
+  "version": "0.1.0",
+  "description": "Anthropic Messages API codec for AgentRewind.",
+  "type": "module",
+  "keywords": [
+    "anthropic",
+    "claude",
+    "llm",
+    "agents",
+    "replay"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --target node20 --tsconfig ../../tsconfig.base.json",
+    "prepack": "pnpm build"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/sdk": "*"
+  },
+  "dependencies": {
+    "@agentrewind/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.100.1"
+  }
+}

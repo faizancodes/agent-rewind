@@ -1,0 +1,27 @@
+{
+  "name": "agentrewind-workspace",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.13.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "check": "pnpm typecheck && pnpm test && pnpm build && pnpm examples:run",
+    "examples:run": "node examples/sample-agent/index.mjs && node examples/fork-replay-prompt-fix/index.mjs && node examples/openai-compatible-support-bot/index.mjs && node examples/openai-compatible-streaming/index.mjs && node examples/openrouter-support-router/index.mjs && node examples/anthropic-tool-agent/index.mjs",
+    "pack:packages": "pnpm build && node scripts/pack-workspace.mjs",
+    "publish:dry-run": "pnpm build && pnpm -r publish --dry-run --no-git-checks",
+    "publish:npm": "pnpm build && pnpm -r publish --access public",
+    "test:provider-forks": "vitest run packages/codec-openai/test/codec-openai.test.ts packages/codec-anthropic/test/codec-anthropic.test.ts packages/codec-openrouter/test/codec-openrouter.test.ts",
+    "test:live:provider-forks": "AGENTREWIND_LIVE_PROVIDER_FORKS=1 vitest run packages/codec-openai/test/codec-openai.test.ts packages/codec-anthropic/test/codec-anthropic.test.ts packages/codec-openrouter/test/codec-openrouter.test.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.base.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.7"
+  }
+}
