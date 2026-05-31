@@ -43,7 +43,7 @@ arw inspect <session>
 ## Notes
 
 - `quickstart` prints install commands and a minimal TypeScript record/replay
-  starter for the selected provider. Use `--manager npm`, `--manager yarn`, or
+  starter for the selected provider. Use `--manager pnpm`, `--manager yarn`, or
   `--manager bun` for a different install command. Use `--format ts` to print
   raw TypeScript, or `--out <file>` to write a starter file. Starters use
   `defineHarness()` so TypeScript infers the harness result without a manual

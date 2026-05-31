@@ -1,6 +1,6 @@
 {
   "name": "@agentrewind/core",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Dependency-free AgentRewind core runtime for deterministic LLM-agent record, replay, and fork.",
   "type": "module",
   "keywords": [

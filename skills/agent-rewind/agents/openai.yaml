@@ -1,4 +1,4 @@
 interface:
   display_name: "AgentRewind"
-  short_description: "Adopt AgentRewind in agent codebases"
-  default_prompt: "Use $agent-rewind to add deterministic record/replay support to this LLM agent."
+  short_description: "Integrate and verify @agentrewind/sdk"
+  default_prompt: "Use $agent-rewind to add deterministic record/replay/fork support with @agentrewind/sdk."

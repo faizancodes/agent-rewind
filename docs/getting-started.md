@@ -18,14 +18,21 @@ Record mode calls the live model and tools, then writes a session to disk.
 Strict replay runs the same harness and serves recorded outputs instead of
 calling the live model or tools again.
 
-## Pick The Provider Path
+## Install
 
-| Your model client | Install | Codec |
-| --- | --- | --- |
-| OpenAI Chat Completions | `@agentrewind/sdk @agentrewind/codec-openai openai` | `openaiChatCodec()` |
-| OpenAI-compatible `baseURL` provider | `@agentrewind/sdk @agentrewind/codec-openai openai` | `openaiChatCodec()` |
-| OpenRouter through the OpenAI SDK | `@agentrewind/sdk @agentrewind/codec-openrouter openai` | `openRouterChatCodec()` |
-| Anthropic Messages | `@agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk` | `anthropicCodec()` |
+```sh
+npm install @agentrewind/sdk
+```
+
+That one package includes the SDK runtime, CLI, built-in provider codecs,
+OpenAI client, Anthropic client, and replay test helpers. Pick the codec helper
+that matches your model client:
+
+| Model client | Codec |
+| --- | --- |
+| OpenAI Chat Completions or compatible `baseURL` provider | `openaiChatCodec()` |
+| OpenRouter through the OpenAI SDK | `openRouterChatCodec()` |
+| Anthropic Messages | `anthropicCodec()` |
 
 AgentRewind does not wrap arbitrary `fetch` calls. If an external operation
 affects prompts, tool arguments, or branching, model it as a tool.
@@ -39,8 +46,8 @@ agentrewind quickstart openrouter
 agentrewind quickstart anthropic
 ```
 
-Use `--manager npm`, `--manager yarn`, or `--manager bun` if you do not use
-pnpm.
+Use `--manager pnpm`, `--manager yarn`, or `--manager bun` if you do not use
+npm.
 
 Use `--format ts` for raw TypeScript or `--out <file>` to write a starter file:
 
@@ -52,8 +59,7 @@ agentrewind quickstart openrouter --out agentrewind-openrouter.ts
 ## Minimal Shape
 
 ```ts
-import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
-import { openaiChatCodec } from "@agentrewind/codec-openai";
+import { AgentRewind, assertProviderClient, defineHarness, openaiChatCodec } from "@agentrewind/sdk";
 
 const codec = openaiChatCodec();
 const chatModel = process.env.OPENAI_MODEL ?? "gpt-5.5";

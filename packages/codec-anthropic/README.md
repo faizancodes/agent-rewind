@@ -7,10 +7,14 @@ Messages API.
 
 ## Install
 
+Most users get this codec through the SDK:
+
 ```sh
-pnpm add @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
-npm install @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
+npm install @agentrewind/sdk
 ```
+
+Use this package directly only when a library needs granular dependency
+boundaries.
 
 ## Supported Client Shape
 
@@ -22,10 +26,8 @@ The codec wraps:
 ## Recording
 
 ```ts
-import Anthropic from "@anthropic-ai/sdk";
-import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
-import { anthropicCodec } from "@agentrewind/codec-anthropic";
-import type { Message, RawMessageStreamEvent } from "@anthropic-ai/sdk/resources/messages/messages";
+import { AgentRewind, Anthropic, anthropicCodec, assertProviderClient, defineHarness } from "@agentrewind/sdk";
+import type { AnthropicMessage, AnthropicRawMessageStreamEvent } from "@agentrewind/sdk";
 
 const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY
@@ -35,7 +37,7 @@ const codec = anthropicCodec();
 assertProviderClient(client, codec);
 
 const harness = defineHarness(async (ctx) => {
-  const message = await ctx.model.create<Message>(
+  const message = await ctx.model.create<AnthropicMessage>(
     {
       model: "claude-opus-4-8",
       max_tokens: 256,
@@ -81,7 +83,7 @@ assertProviderClient(client, codec, ["stream"]);
 
 ```ts
 await session.run(async (ctx) => {
-  for await (const event of ctx.model.stream<RawMessageStreamEvent>(
+  for await (const event of ctx.model.stream<AnthropicRawMessageStreamEvent>(
     {
       model: "claude-opus-4-8",
       max_tokens: 256,

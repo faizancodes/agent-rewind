@@ -7,10 +7,14 @@ OpenAI-compatible providers configured with a custom `baseURL`.
 
 ## Install
 
+Most users get this codec through the SDK:
+
 ```sh
-pnpm add @agentrewind/sdk @agentrewind/codec-openai openai
-npm install @agentrewind/sdk @agentrewind/codec-openai openai
+npm install @agentrewind/sdk
 ```
+
+Use this package directly only when a library needs granular dependency
+boundaries.
 
 ## Supported Client Shape
 
@@ -23,7 +27,7 @@ That is the method shape provided by the OpenAI Node SDK. For an
 OpenAI-compatible provider, keep using the OpenAI SDK and set `baseURL`:
 
 ```ts
-import OpenAI from "openai";
+import { OpenAI } from "@agentrewind/sdk";
 
 const client = new OpenAI({
   apiKey: process.env.COMPATIBLE_API_KEY,
@@ -34,10 +38,8 @@ const client = new OpenAI({
 ## Recording
 
 ```ts
-import OpenAI from "openai";
-import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
-import { openaiChatCodec } from "@agentrewind/codec-openai";
-import type { ChatCompletion, ChatCompletionChunk } from "openai/resources/chat/completions";
+import { AgentRewind, OpenAI, assertProviderClient, defineHarness, openaiChatCodec } from "@agentrewind/sdk";
+import type { ChatCompletion, ChatCompletionChunk } from "@agentrewind/sdk";
 
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY

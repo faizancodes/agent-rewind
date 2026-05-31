@@ -84,7 +84,7 @@ try {
 The formatted message summarizes expected vs actual boundaries and includes the
 next CLI commands to run. When a named model call drifted, it points to
 `agentrewind context <session> --site <name>` so the next command uses the same
-logical site name as your harness. `@agentrewind/test` uses the same formatter
+logical site name as your harness. The SDK test helpers use the same formatter
 when it turns drift into an assertion failure.
 
 For manual investigation, start with the readable timeline:
@@ -119,8 +119,7 @@ Record a golden trajectory locally, commit or upload the safe packed artifact
 according to your project policy, and assert it in tests:
 
 ```ts
-import { fromSession } from "@agentrewind/test";
-import { openaiChatCodec } from "@agentrewind/codec-openai";
+import { fromSession, openaiChatCodec } from "@agentrewind/sdk";
 
 test("support router trajectory is stable", async () => {
   const session = await fromSession("support-router", {

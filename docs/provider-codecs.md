@@ -6,6 +6,16 @@ AgentRewind shapes.
 
 ## Built-In Codecs
 
+Application code usually installs only the SDK:
+
+```sh
+npm install @agentrewind/sdk
+```
+
+The smaller codec packages are still published for libraries that need
+granular dependency boundaries, but the SDK installs and re-exports all built-in
+codecs and provider SDK clients.
+
 | Codec | Package | Client methods |
 | --- | --- | --- |
 | OpenAI-compatible Chat Completions | `@agentrewind/codec-openai` | `chat.completions.create()`, `chat.completions.stream()` |
@@ -61,7 +71,7 @@ providers are skipped so you can smoke test one provider at a time.
 Use the OpenAI Node SDK and configure the provider endpoint with `baseURL`:
 
 ```ts
-import OpenAI from "openai";
+import { OpenAI } from "@agentrewind/sdk";
 
 const model = new OpenAI({
   apiKey: process.env.COMPATIBLE_API_KEY,
@@ -72,8 +82,7 @@ const model = new OpenAI({
 Then use `openaiChatCodec()` in both record and replay:
 
 ```ts
-import { AgentRewind, assertProviderClient } from "@agentrewind/sdk";
-import { openaiChatCodec } from "@agentrewind/codec-openai";
+import { AgentRewind, assertProviderClient, openaiChatCodec } from "@agentrewind/sdk";
 
 const codec = openaiChatCodec();
 assertProviderClient(model, codec);
@@ -92,14 +101,18 @@ client behind the expected method paths.
 
 ## OpenRouter
 
-OpenRouter is first-class through `@agentrewind/codec-openrouter`. It still uses
-the OpenAI Node SDK method shape, but the package gives recordings a distinct
-provider name and provides OpenRouter defaults:
+OpenRouter is first-class through SDK helpers. It still uses the OpenAI Node SDK
+method shape, but the OpenRouter codec gives recordings a distinct provider
+name and provides OpenRouter defaults:
 
 ```ts
-import OpenAI from "openai";
-import { AgentRewind, assertProviderClient } from "@agentrewind/sdk";
-import { openRouterChatCodec, openRouterClientOptions } from "@agentrewind/codec-openrouter";
+import {
+  AgentRewind,
+  OpenAI,
+  assertProviderClient,
+  openRouterChatCodec,
+  openRouterClientOptions
+} from "@agentrewind/sdk";
 
 const model = new OpenAI(
   openRouterClientOptions({
@@ -128,9 +141,7 @@ back on fork/passthrough live calls.
 Use `anthropicCodec()` with an Anthropic SDK client:
 
 ```ts
-import Anthropic from "@anthropic-ai/sdk";
-import { AgentRewind, assertProviderClient } from "@agentrewind/sdk";
-import { anthropicCodec } from "@agentrewind/codec-anthropic";
+import { AgentRewind, Anthropic, anthropicCodec, assertProviderClient } from "@agentrewind/sdk";
 
 const model = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY
@@ -173,7 +184,7 @@ import type {
   NormalizedResponse,
   ProviderCodec,
   Usage
-} from "@agentrewind/core";
+} from "@agentrewind/sdk";
 
 export function myProviderCodec(): ProviderCodec {
   return {

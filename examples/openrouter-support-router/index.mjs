@@ -34,7 +34,7 @@ const escalatedTicket = {
 try {
   // In a real app:
   //
-  //   import OpenAI from "openai";
+  //   import { OpenAI } from "@agentrewind/sdk";
   //   const model = new OpenAI(openRouterClientOptions({ apiKey: process.env.OPENROUTER_API_KEY, ... }));
   //
   // The fake client below does not use this object, but checking it here makes

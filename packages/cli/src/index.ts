@@ -27,12 +27,12 @@ import {
 
 const program = new Command();
 
-program.name("agentrewind").alias("arw").description("Inspect and package AgentRewind sessions").version("0.1.0");
+program.name("agentrewind").alias("arw").description("Inspect and package AgentRewind sessions").version("0.1.1");
 
 program
   .command("quickstart")
   .argument("[provider]", "openai | openai-compatible | openrouter | anthropic")
-  .option("--manager <name>", "package manager for install command: pnpm, npm, yarn, or bun", "pnpm")
+  .option("--manager <name>", "package manager for install command: npm, pnpm, yarn, or bun", "npm")
   .option("--format <format>", "output format: markdown or ts")
   .option("--out <file>", "write a TypeScript starter file")
   .option("--force", "overwrite --out when it already exists")
@@ -371,7 +371,7 @@ function formatQuickstart(inputProvider: string | undefined, manager: string, fo
       "  agentrewind quickstart openrouter",
       "  agentrewind quickstart anthropic",
       "",
-      "Add --manager npm, --manager yarn, or --manager bun if you do not use pnpm."
+      "Add --manager pnpm, --manager yarn, or --manager bun if you do not use npm."
     ].join("\n");
   }
 
@@ -550,7 +550,7 @@ function parsePackageManager(manager: string): "pnpm" | "npm" | "yarn" | "bun" {
     case "bun":
       return manager;
     default:
-      throw new TypeError(`Unknown package manager "${manager}". Use pnpm, npm, yarn, or bun.`);
+      throw new TypeError(`Unknown package manager "${manager}". Use npm, pnpm, yarn, or bun.`);
   }
 }
 
@@ -575,12 +575,11 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         provider,
         title: "AgentRewind OpenAI Chat Completions Quickstart",
         site: "answer-question",
-        install: ["@agentrewind/sdk", "@agentrewind/codec-openai", "openai"],
+        install: ["@agentrewind/sdk"],
         env: ["OPENAI_API_KEY=...", "OPENAI_MODEL=..."],
         imports: [
-          "import OpenAI from \"openai\";",
-          "import { openaiChatCodec } from \"@agentrewind/codec-openai\";",
-          "import type { ChatCompletion } from \"openai/resources/chat/completions\";"
+          "import { OpenAI, openaiChatCodec } from \"@agentrewind/sdk\";",
+          "import type { ChatCompletion } from \"@agentrewind/sdk\";"
         ].join("\n"),
         client: "const model = new OpenAI({ apiKey: requiredEnv(\"OPENAI_API_KEY\") });",
         codec: "const codec = openaiChatCodec();",
@@ -592,12 +591,11 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         provider,
         title: "AgentRewind OpenAI-Compatible Provider Quickstart",
         site: "answer-question",
-        install: ["@agentrewind/sdk", "@agentrewind/codec-openai", "openai"],
+        install: ["@agentrewind/sdk"],
         env: ["COMPATIBLE_API_KEY=...", "COMPATIBLE_BASE_URL=https://your-provider.example/v1", "COMPATIBLE_MODEL=..."],
         imports: [
-          "import OpenAI from \"openai\";",
-          "import { openaiChatCodec } from \"@agentrewind/codec-openai\";",
-          "import type { ChatCompletion } from \"openai/resources/chat/completions\";"
+          "import { OpenAI, openaiChatCodec } from \"@agentrewind/sdk\";",
+          "import type { ChatCompletion } from \"@agentrewind/sdk\";"
         ].join("\n"),
         client: [
           "const model = new OpenAI({",
@@ -614,12 +612,11 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         provider,
         title: "AgentRewind OpenRouter Quickstart",
         site: "openrouter-answer",
-        install: ["@agentrewind/sdk", "@agentrewind/codec-openrouter", "openai"],
+        install: ["@agentrewind/sdk"],
         env: ["OPENROUTER_API_KEY=...", "OPENROUTER_MODEL=..."],
         imports: [
-          "import OpenAI from \"openai\";",
-          "import { openRouterChatCodec, openRouterClientOptions } from \"@agentrewind/codec-openrouter\";",
-          "import type { ChatCompletion } from \"openai/resources/chat/completions\";"
+          "import { OpenAI, openRouterChatCodec, openRouterClientOptions } from \"@agentrewind/sdk\";",
+          "import type { ChatCompletion } from \"@agentrewind/sdk\";"
         ].join("\n"),
         client: [
           "const model = new OpenAI(",
@@ -639,12 +636,11 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         provider,
         title: "AgentRewind Anthropic Messages Quickstart",
         site: "draft-answer",
-        install: ["@agentrewind/sdk", "@agentrewind/codec-anthropic", "@anthropic-ai/sdk"],
+        install: ["@agentrewind/sdk"],
         env: ["ANTHROPIC_API_KEY=...", "ANTHROPIC_MODEL=..."],
         imports: [
-          "import Anthropic from \"@anthropic-ai/sdk\";",
-          "import { anthropicCodec } from \"@agentrewind/codec-anthropic\";",
-          "import type { Message } from \"@anthropic-ai/sdk/resources/messages/messages\";"
+          "import { Anthropic, anthropicCodec } from \"@agentrewind/sdk\";",
+          "import type { AnthropicMessage } from \"@agentrewind/sdk\";"
         ].join("\n"),
         client: "const model = new Anthropic({ apiKey: requiredEnv(\"ANTHROPIC_API_KEY\") });",
         codec: "const codec = anthropicCodec();",
@@ -698,7 +694,7 @@ function openRouterRequest(model: string, site: string): string {
 
 function anthropicRequest(model: string, site: string): string {
   return [
-    "const message = await ctx.model.create<Message>(",
+    "const message = await ctx.model.create<AnthropicMessage>(",
     "  {",
     `    model: ${model},`,
     "    max_tokens: 256,",

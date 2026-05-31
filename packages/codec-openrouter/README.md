@@ -9,18 +9,27 @@ option helper.
 
 ## Install
 
+Most users get this codec through the SDK:
+
 ```sh
-pnpm add @agentrewind/sdk @agentrewind/codec-openrouter openai
-npm install @agentrewind/sdk @agentrewind/codec-openrouter openai
+npm install @agentrewind/sdk
 ```
+
+Use this package directly only when a library needs granular dependency
+boundaries.
 
 ## Recording
 
 ```ts
-import OpenAI from "openai";
-import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
-import { openRouterChatCodec, openRouterClientOptions } from "@agentrewind/codec-openrouter";
-import type { ChatCompletion } from "openai/resources/chat/completions";
+import {
+  AgentRewind,
+  OpenAI,
+  assertProviderClient,
+  defineHarness,
+  openRouterChatCodec,
+  openRouterClientOptions
+} from "@agentrewind/sdk";
+import type { ChatCompletion } from "@agentrewind/sdk";
 
 const client = new OpenAI(
   openRouterClientOptions({

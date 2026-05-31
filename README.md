@@ -11,21 +11,13 @@ continuing.
 
 ## Install
 
-Choose the provider codec that matches the SDK client your agent uses:
-
 ```sh
-pnpm add @agentrewind/sdk @agentrewind/codec-openai openai
-pnpm add @agentrewind/sdk @agentrewind/codec-openrouter openai
-pnpm add @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
+npm install @agentrewind/sdk
 ```
 
-```sh
-npm install @agentrewind/sdk @agentrewind/codec-openai openai
-npm install @agentrewind/sdk @agentrewind/codec-openrouter openai
-npm install @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
-```
-
-AgentRewind is ESM-only and requires Node 20 or newer.
+This installs the SDK, CLI, built-in provider codecs, OpenAI client, Anthropic
+client, and replay test helpers. AgentRewind is ESM-only and requires Node 20
+or newer.
 
 ## Start Here
 
@@ -53,13 +45,16 @@ agentrewind quickstart openai --out agentrewind-openai.ts
 
 | Package | Use it for |
 | --- | --- |
-| `@agentrewind/sdk` | Umbrella package that re-exports `@agentrewind/core` and installs the `agentrewind` / `arw` CLI. |
+| `@agentrewind/sdk` | Umbrella package for normal app use. It installs and re-exports the runtime, CLI, built-in provider codecs, OpenAI and Anthropic clients, and replay test helpers. |
 | `@agentrewind/core` | Dependency-free runtime for record, replay, fork, session storage, redaction, and inspection helpers. |
 | `@agentrewind/codec-openai` | OpenAI-compatible Chat Completions clients using `chat.completions.create()` and `chat.completions.stream()`. |
 | `@agentrewind/codec-openrouter` | First-class OpenRouter Chat Completions support using the OpenAI SDK with OpenRouter defaults and attribution headers. |
 | `@agentrewind/codec-anthropic` | Anthropic Messages clients using `messages.create()` and `messages.stream()`. |
 | `@agentrewind/test` | Test helper for asserting a harness still follows a recorded trajectory. |
 | `@agentrewind/cli` | CLI implementation used by the umbrella package. |
+
+Most applications should import from `@agentrewind/sdk`. The smaller packages
+remain published for libraries that need granular dependency boundaries.
 
 ## How It Works
 
@@ -128,10 +123,8 @@ Use this path for OpenAI and providers that work through the OpenAI Node SDK
 with a custom `baseURL`.
 
 ```ts
-import OpenAI from "openai";
-import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
-import { openaiChatCodec } from "@agentrewind/codec-openai";
-import type { ChatCompletion, ChatCompletionChunk } from "openai/resources/chat/completions";
+import { AgentRewind, OpenAI, assertProviderClient, defineHarness, openaiChatCodec } from "@agentrewind/sdk";
+import type { ChatCompletion, ChatCompletionChunk } from "@agentrewind/sdk";
 
 const model = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
@@ -232,15 +225,20 @@ The OpenAI codec expects the client to expose
 
 ## Quickstart: OpenRouter
 
-OpenRouter uses the OpenAI SDK with a different base URL. AgentRewind exposes a
-first-class `@agentrewind/codec-openrouter` package so OpenRouter sessions have
-their own provider identity and client setup helper.
+OpenRouter uses the OpenAI SDK with a different base URL. AgentRewind exposes
+first-class OpenRouter helpers from the SDK so OpenRouter sessions have their
+own provider identity and client setup defaults.
 
 ```ts
-import OpenAI from "openai";
-import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
-import { openRouterChatCodec, openRouterClientOptions } from "@agentrewind/codec-openrouter";
-import type { ChatCompletion } from "openai/resources/chat/completions";
+import {
+  AgentRewind,
+  OpenAI,
+  assertProviderClient,
+  defineHarness,
+  openRouterChatCodec,
+  openRouterClientOptions
+} from "@agentrewind/sdk";
+import type { ChatCompletion } from "@agentrewind/sdk";
 
 const model = new OpenAI(
   openRouterClientOptions({
@@ -286,10 +284,8 @@ const replayed = await AgentRewind.replayRun(recorded.path, { codec }, harness);
 ## Quickstart: Anthropic Messages
 
 ```ts
-import Anthropic from "@anthropic-ai/sdk";
-import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
-import { anthropicCodec } from "@agentrewind/codec-anthropic";
-import type { Message } from "@anthropic-ai/sdk/resources/messages/messages";
+import { AgentRewind, Anthropic, anthropicCodec, assertProviderClient, defineHarness } from "@agentrewind/sdk";
+import type { AnthropicMessage } from "@agentrewind/sdk";
 
 const model = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY
@@ -300,7 +296,7 @@ const codec = anthropicCodec();
 assertProviderClient(model, codec);
 
 const harness = defineHarness(async (ctx) => {
-  const message = await ctx.model.create<Message>(
+  const message = await ctx.model.create<AnthropicMessage>(
     {
       model: anthropicModel,
       max_tokens: 256,
@@ -392,7 +388,7 @@ the missing tool name.
 Pass the SDK response type as a generic when you want typed fields:
 
 ```ts
-import type { ChatCompletion } from "openai/resources/chat/completions";
+import type { ChatCompletion } from "@agentrewind/sdk";
 
 const completion = await ctx.model.create<ChatCompletion>(request, {
   site: "typed-openai-call"
@@ -620,12 +616,11 @@ not include the vault.
 
 ## Testing
 
-Use `@agentrewind/test` to turn a recorded session into a replay regression
+Use the SDK test helpers to turn a recorded session into a replay regression
 test. The shortest form is one assertion:
 
 ```ts
-import { assertReplay } from "@agentrewind/test";
-import { openaiChatCodec } from "@agentrewind/codec-openai";
+import { assertReplay, openaiChatCodec } from "@agentrewind/sdk";
 
 await assertReplay("latest", { store: ".rewind", codec: openaiChatCodec() }, async (ctx) => {
   await ctx.model.create(
@@ -641,7 +636,7 @@ await assertReplay("latest", { store: ".rewind", codec: openaiChatCodec() }, asy
 Use `fromSession()` when a test needs to inspect events before asserting:
 
 ```ts
-import { fromSession } from "@agentrewind/test";
+import { fromSession } from "@agentrewind/sdk";
 
 const session = await fromSession("openai-demo", {
   store: ".rewind",

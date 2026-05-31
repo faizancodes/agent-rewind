@@ -39,7 +39,7 @@ const replayed = await AgentRewind.replayRun(recorded.path, { codec }, harness);
 External I/O that affects prompts or control flow should be a tool:
 
 ```ts
-import { defineHarness, defineTools } from "@agentrewind/sdk";
+import { AgentRewind, defineHarness, defineTools } from "@agentrewind/sdk";
 
 const tools = defineTools({
   lookupCustomer: async (args: { customerId: string }) => {
@@ -164,6 +164,7 @@ The packed bundle excludes `vault.enc`; it should include `meta.json`,
 
 - Calling `client.chat.completions.create()` directly inside the harness.
 - Forgetting `await session.close()`.
+- Importing from an unscoped `agentrewind` package instead of `@agentrewind/sdk`.
 - Reusing `ctx.model.create()` for streaming instead of `ctx.model.stream()`.
 - Using `Date.now()` in a prompt and then expecting strict replay to match.
 - Treating `warn` or `passthrough` replay as deterministic test evidence.

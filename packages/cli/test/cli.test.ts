@@ -276,7 +276,8 @@ describe("agentrewind CLI", () => {
     expect(list.stdout).toContain("agentrewind quickstart anthropic");
 
     const openrouter = await execFileAsync("node", [cli, "quickstart", "openrouter", "--manager", "npm"]);
-    expect(openrouter.stdout).toContain("npm install @agentrewind/sdk @agentrewind/codec-openrouter openai");
+    expect(openrouter.stdout).toContain("npm install @agentrewind/sdk");
+    expect(openrouter.stdout).toContain("import { OpenAI, openRouterChatCodec, openRouterClientOptions } from \"@agentrewind/sdk\";");
     expect(openrouter.stdout).toContain("openRouterClientOptions");
     expect(openrouter.stdout).toContain("requiredEnv(\"OPENROUTER_API_KEY\")");
     expect(openrouter.stdout).toContain("requiredEnv(\"OPENROUTER_MODEL\")");
@@ -295,7 +296,8 @@ describe("agentrewind CLI", () => {
     expect(openrouter.stdout).toContain("agentrewind context .rewind/openrouter-demo --site openrouter-answer");
 
     const anthropic = await execFileAsync("node", [cli, "quickstart", "anthropic"]);
-    expect(anthropic.stdout).toContain("pnpm add @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk");
+    expect(anthropic.stdout).toContain("npm install @agentrewind/sdk");
+    expect(anthropic.stdout).toContain("import { Anthropic, anthropicCodec } from \"@agentrewind/sdk\";");
     expect(anthropic.stdout).toContain("ANTHROPIC_MODEL=...");
     expect(anthropic.stdout).toContain("anthropicCodec");
     expect(anthropic.stdout).toContain("explainRewindError");

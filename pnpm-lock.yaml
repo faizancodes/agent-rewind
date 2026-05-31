@@ -70,9 +70,27 @@ importers:
       '@agentrewind/cli':
         specifier: workspace:*
         version: link:../cli
+      '@agentrewind/codec-anthropic':
+        specifier: workspace:*
+        version: link:../codec-anthropic
+      '@agentrewind/codec-openai':
+        specifier: workspace:*
+        version: link:../codec-openai
+      '@agentrewind/codec-openrouter':
+        specifier: workspace:*
+        version: link:../codec-openrouter
       '@agentrewind/core':
         specifier: workspace:*
         version: link:../core
+      '@agentrewind/test':
+        specifier: workspace:*
+        version: link:../test
+      '@anthropic-ai/sdk':
+        specifier: ^0.100.1
+        version: 0.100.1
+      openai:
+        specifier: ^6.39.1
+        version: 6.39.1
 
   packages/test:
     dependencies:

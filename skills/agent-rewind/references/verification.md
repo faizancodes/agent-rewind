@@ -132,12 +132,39 @@ pnpm examples:run
 pnpm check
 ```
 
-If public exports or package metadata changed, also pack the package:
+If public exports or package metadata changed, also run release packaging checks:
 
 ```sh
-cd packages/codec-openrouter
-pnpm pack --pack-destination /tmp/agentrewind-pack
+pnpm pack:packages
+pnpm publish:dry-run
 ```
 
 For installed-package confidence, create a temporary consumer project and install
-local tarballs or published packages, then run a small record/replay probe.
+local tarballs or the published packages:
+
+```sh
+tmp="$(mktemp -d /tmp/agentrewind-install.XXXXXX)"
+cd "$tmp"
+npm init -y
+npm install @agentrewind/sdk
+node --input-type=module -e 'import { AgentRewind, OpenAI, Anthropic, openaiChatCodec, openRouterChatCodec, anthropicCodec, assertReplay } from "@agentrewind/sdk"; console.log(typeof AgentRewind.recordRun, typeof OpenAI, typeof Anthropic, typeof openaiChatCodec, typeof openRouterChatCodec, typeof anthropicCodec, typeof assertReplay)'
+npx agentrewind --help
+```
+
+## Published Package Verification
+
+The public npm package family should resolve together:
+
+```sh
+npm view @agentrewind/sdk version
+npm view @agentrewind/core version
+npm view @agentrewind/cli version
+npm view @agentrewind/test version
+npm view @agentrewind/codec-openai version
+npm view @agentrewind/codec-openrouter version
+npm view @agentrewind/codec-anthropic version
+```
+
+If publishing needs an npm token, keep it outside the repo, source it without
+printing it, and remove temporary npm config files after publishing. Never write
+npm tokens into tracked files or chat.

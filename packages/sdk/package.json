@@ -1,6 +1,6 @@
 {
   "name": "@agentrewind/sdk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Umbrella package for recording, replaying, inspecting, and forking LLM-agent runs.",
   "type": "module",
   "keywords": [
@@ -37,7 +37,13 @@
   },
   "dependencies": {
     "@agentrewind/cli": "workspace:*",
-    "@agentrewind/core": "workspace:*"
+    "@agentrewind/core": "workspace:*",
+    "@agentrewind/codec-anthropic": "workspace:*",
+    "@agentrewind/codec-openai": "workspace:*",
+    "@agentrewind/codec-openrouter": "workspace:*",
+    "@agentrewind/test": "workspace:*",
+    "@anthropic-ai/sdk": "^0.100.1",
+    "openai": "^6.39.1"
   },
   "repository": {
     "type": "git",

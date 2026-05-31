@@ -2,28 +2,31 @@
 
 Use this reference when choosing or wiring the provider codec.
 
-## Install Matrix
+## Install
 
 ```sh
-pnpm add @agentrewind/sdk @agentrewind/codec-openai openai
-pnpm add @agentrewind/sdk @agentrewind/codec-openrouter openai
-pnpm add @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
+npm install @agentrewind/sdk
 ```
 
-```sh
-npm install @agentrewind/sdk @agentrewind/codec-openai openai
-npm install @agentrewind/sdk @agentrewind/codec-openrouter openai
-npm install @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
-```
+That one package includes the SDK runtime, CLI, built-in provider codecs,
+OpenAI client, Anthropic client, and replay test helpers. Pick the helper that
+matches the model client:
+
+| Model client | Helper |
+| --- | --- |
+| OpenAI Chat Completions or OpenAI-compatible `baseURL` provider | `OpenAI`, `openaiChatCodec()` |
+| OpenRouter | `OpenAI`, `openRouterClientOptions()`, `openRouterChatCodec()` |
+| Anthropic Messages | `Anthropic`, `anthropicCodec()` |
 
 AgentRewind is ESM-only and requires Node 20 or newer.
+
+`@agentrewind/sdk` is the application entrypoint and installs the `agentrewind`
+and `arw` CLI binaries. Do not use an unscoped `agentrewind` package import.
 
 ## OpenAI Chat Completions
 
 ```ts
-import OpenAI from "openai";
-import { AgentRewind } from "@agentrewind/sdk";
-import { openaiChatCodec } from "@agentrewind/codec-openai";
+import { AgentRewind, OpenAI, openaiChatCodec } from "@agentrewind/sdk";
 
 const model = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const codec = openaiChatCodec();
@@ -57,8 +60,7 @@ Use this when the provider follows OpenAI Chat Completions but is not OpenRouter
 ## OpenRouter
 
 ```ts
-import OpenAI from "openai";
-import { openRouterChatCodec, openRouterClientOptions } from "@agentrewind/codec-openrouter";
+import { OpenAI, openRouterChatCodec, openRouterClientOptions } from "@agentrewind/sdk";
 
 const model = new OpenAI(
   openRouterClientOptions({
@@ -79,8 +81,7 @@ preserved.
 ## Anthropic Messages
 
 ```ts
-import Anthropic from "@anthropic-ai/sdk";
-import { anthropicCodec } from "@agentrewind/codec-anthropic";
+import { Anthropic, anthropicCodec } from "@agentrewind/sdk";
 
 const model = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const codec = anthropicCodec();
@@ -96,7 +97,7 @@ Supported client methods:
 `ctx.model` is provider-neutral. Add SDK response types at call sites:
 
 ```ts
-import type { ChatCompletion } from "openai/resources/chat/completions";
+import type { ChatCompletion } from "@agentrewind/sdk";
 
 const completion = await ctx.model.create<ChatCompletion>(request, {
   site: "typed-call"
@@ -106,7 +107,7 @@ const completion = await ctx.model.create<ChatCompletion>(request, {
 For streams:
 
 ```ts
-import type { ChatCompletionChunk } from "openai/resources/chat/completions";
+import type { ChatCompletionChunk } from "@agentrewind/sdk";
 
 for await (const chunk of ctx.model.stream<ChatCompletionChunk>(request, {
   site: "stream-answer"
