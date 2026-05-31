@@ -1,8 +1,11 @@
 import { execFile } from "node:child_process";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { openaiChatCodec } from "@agentrewind/codec-openai";
 import { beforeAll, describe, expect, it } from "vitest";
 import { AgentRewind, readSession, type NormalizedRequest, type NormalizedResponse, type ProviderCodec } from "@agentrewind/core";
 
@@ -45,8 +48,7 @@ const codec: ProviderCodec = {
 
 describe("agentrewind CLI", () => {
   beforeAll(async () => {
-    await execFileAsync("pnpm", ["--filter", "@agentrewind/core", "build"]);
-    await execFileAsync("pnpm", ["--filter", "@agentrewind/cli", "build"]);
+    await execFileAsync("pnpm", ["build"]);
   }, 30000);
 
   it("inspect/context/diff/pack produce expected output on a fixture session", async () => {
@@ -267,6 +269,129 @@ describe("agentrewind CLI", () => {
     });
   });
 
+  it("fork creates a child session with provider overrides through an OpenAI-compatible endpoint", async () => {
+    const store = await mkdtemp(join(tmpdir(), "agentrewind-cli-fork-"));
+    const cli = join(process.cwd(), "packages/cli/dist/index.js");
+    const requests: unknown[] = [];
+    const server = createServer((request, response) => {
+      void handleOpenAICompatibleRequest(request, response, requests);
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    const baseURL = `http://127.0.0.1:${address.port}/v1`;
+
+    try {
+      const session = AgentRewind.record({
+        id: "fork-parent",
+        store,
+        codec: openaiChatCodec(),
+        model: fakeOpenAIChatModel(
+          chatCompletion("chatcmpl_recorded", "recorded decision", { prompt_tokens: 8, completion_tokens: 2, total_tokens: 10 })
+        )
+      });
+      await session.run(async (ctx) => {
+        await ctx.model.create(
+          {
+            model: "recorded-model",
+            messages: [
+              { role: "system", content: "Route support tickets." },
+              { role: "user", content: "Enterprise refund request." }
+            ],
+            temperature: 0
+          },
+          { site: "classify-ticket" }
+        );
+      });
+      await session.close();
+
+      const sessionPath = join(store, "fork-parent");
+      const modelStep = (await readSession(sessionPath)).events.find((event) => event.kind === "model_call")?.step;
+      expect(modelStep).toEqual(expect.any(Number));
+
+      const dryRun = await execFileAsync(
+        "node",
+        [
+          cli,
+          "fork",
+          sessionPath,
+          "--site",
+          "classify-ticket",
+          "--provider",
+          "openai-compatible",
+          "--base-url",
+          baseURL,
+          "--api-key-env",
+          "AGENTREWIND_TEST_API_KEY",
+          "--model",
+          "fork-model",
+          "--system",
+          "Prefer enterprise escalation.",
+          "--dry-run"
+        ],
+        { env: { ...process.env, AGENTREWIND_TEST_API_KEY: "test-key" } }
+      );
+      expect(dryRun.stdout).toContain("AgentRewind fork plan.");
+      expect(dryRun.stdout).toContain("Fork point: step");
+      expect(requests).toHaveLength(0);
+
+      const fork = await execFileAsync(
+        "node",
+        [
+          cli,
+          "fork",
+          sessionPath,
+          "--step",
+          String(modelStep),
+          "--provider",
+          "openai-compatible",
+          "--base-url",
+          baseURL,
+          "--api-key-env",
+          "AGENTREWIND_TEST_API_KEY",
+          "--model",
+          "fork-model",
+          "--system",
+          "Prefer enterprise escalation.",
+          "--json"
+        ],
+        { env: { ...process.env, AGENTREWIND_TEST_API_KEY: "test-key" } }
+      );
+      const payload = JSON.parse(fork.stdout);
+      expect(payload).toMatchObject({
+        ok: true,
+        parent: sessionPath,
+        provider: "openai-chat",
+        client: "openai-compatible",
+        atStep: modelStep,
+        site: "classify-ticket",
+        overrides: { system: true, model: "fork-model" },
+        tokensSpent: { inputTokens: 13, outputTokens: 5 },
+        trace: { liveModelCalls: 1 }
+      });
+      expect(payload.child).toEqual(expect.stringContaining(join(store, "")));
+      expect(payload.nextCommands).toEqual(expect.arrayContaining([`agentrewind inspect ${payload.child}`]));
+
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        model: "fork-model",
+        messages: [
+          { role: "system", content: "Prefer enterprise escalation." },
+          { role: "user", content: "Enterprise refund request." }
+        ]
+      });
+
+      const child = await readSession(payload.child);
+      expect(child.meta).toMatchObject({
+        parent: "fork-parent",
+        forkedAtStep: modelStep,
+        provider: "openai-chat"
+      });
+      expect(child.events.some((event) => event.kind === "model_call" && event.provenance === "live")).toBe(true);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it("quickstart prints copyable provider starters", async () => {
     const cli = join(process.cwd(), "packages/cli/dist/index.js");
     const store = await mkdtemp(join(tmpdir(), "agentrewind-cli-quickstart-"));
@@ -394,4 +519,84 @@ function fakeModel(responses: NormalizedResponse[]): { create(): Promise<unknown
       return next;
     }
   };
+}
+
+function fakeOpenAIChatModel(response: unknown): { chat: { completions: { create(): Promise<unknown> } } } {
+  return {
+    chat: {
+      completions: {
+        async create() {
+          return response;
+        }
+      }
+    }
+  };
+}
+
+function chatCompletion(
+  id: string,
+  content: string,
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+): Record<string, unknown> {
+  return {
+    id,
+    object: "chat.completion",
+    created: 0,
+    model: "fixture-model",
+    choices: [
+      {
+        index: 0,
+        finish_reason: "stop",
+        message: { role: "assistant", content }
+      }
+    ],
+    usage
+  };
+}
+
+async function handleOpenAICompatibleRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requests: unknown[]
+): Promise<void> {
+  if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+    response.writeHead(404).end();
+    return;
+  }
+  const body = JSON.parse(await readRequestBody(request)) as Record<string, unknown>;
+  requests.push(body);
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(
+    JSON.stringify(chatCompletion("chatcmpl_forked", "forked decision", { prompt_tokens: 13, completion_tokens: 5, total_tokens: 18 }))
+  );
+}
+
+async function readRequestBody(request: IncomingMessage): Promise<string> {
+  let body = "";
+  for await (const chunk of request) {
+    body += chunk;
+  }
+  return body;
+}
+
+function listen(server: ReturnType<typeof createServer>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+}
+
+function closeServer(server: ReturnType<typeof createServer>): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
 }

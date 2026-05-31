@@ -91,6 +91,7 @@ Use this sequence for most code changes:
    agentrewind context .rewind/demo
    agentrewind context .rewind/demo --site decision-name
    agentrewind diff .rewind/demo
+   agentrewind fork .rewind/demo --site decision-name --system "Try the corrected prompt." --dry-run
    ```
 
 ## Engineering Rules
@@ -126,7 +127,7 @@ Before saying the integration works, verify with evidence:
 - Tool handlers are not called during strict replay.
 - Entropy values embedded in prompts are replayed.
 - Redaction keeps key-shaped secrets out of `events.jsonl`.
-- `agentrewind inspect/context/diff/pack/unpack` works on a recorded session when CLI behavior is in scope.
+- `agentrewind inspect/context/diff/fork/pack/unpack` works on a recorded session when CLI behavior is in scope.
 - Use `agentrewind inspect --json` when an automation needs stable timeline fields.
 - Optional live smoke tests run only from local env vars and never print secrets.
 - If package exports or metadata changed, verify an installed consumer can import from `@agentrewind/sdk` and run `npx agentrewind --help`.

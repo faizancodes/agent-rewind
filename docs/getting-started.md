@@ -168,6 +168,7 @@ agentrewind inspect .rewind/first-recording
 agentrewind inspect .rewind/first-recording --json
 agentrewind context .rewind/first-recording
 agentrewind context .rewind/first-recording --site answer-question
+agentrewind fork .rewind/first-recording --site answer-question --system "Try a safer policy prompt." --dry-run
 agentrewind entropy .rewind/first-recording --source uuid
 agentrewind pack .rewind/first-recording first-recording.rewind
 ```
@@ -293,8 +294,25 @@ The normal fork workflow is:
 
 1. Run strict replay once to prove the session is usable.
 2. Find a model-call step with `agentrewind inspect`.
-3. Call `replay.fork({ atStep, harness, model, overrides, goal })`.
-4. Assert `fork.reachedGoal`, inspect `fork.trace.events()`, and check
+3. For provider-backed prompt/model experiments, run `agentrewind fork`.
+4. For harness-aware experiments, call `replay.fork({ atStep, harness, model, overrides, goal })`.
+5. Assert `fork.reachedGoal`, inspect `fork.trace.events()`, and check
    `fork.tokensSpent`.
+
+CLI example:
+
+```sh
+agentrewind fork latest \
+  --store .rewind \
+  --site answer-question \
+  --system "Prefer policy-backed answers." \
+  --model gpt-5.5
+```
+
+The CLI writes a child session next to the parent and prints the next
+`inspect` / `context` commands. It uses `OPENAI_API_KEY`, `OPENROUTER_API_KEY`,
+`ANTHROPIC_API_KEY`, or `COMPATIBLE_API_KEY` plus `COMPATIBLE_BASE_URL`
+depending on the provider. Add `--dry-run` first when you want to confirm the
+step and provider without making a live model call.
 
 See `examples/fork-replay-prompt-fix` for a copyable script.

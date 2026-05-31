@@ -1,8 +1,15 @@
 #!/usr/bin/env node
-import { access, mkdir, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import Anthropic from "@anthropic-ai/sdk";
+import { anthropicCodec } from "@agentrewind/codec-anthropic";
+import { openaiChatCodec } from "@agentrewind/codec-openai";
+import { openRouterChatCodec, openRouterClientOptions } from "@agentrewind/codec-openrouter";
 import { Command } from "commander";
+import OpenAI from "openai";
 import {
+  AgentRewind,
+  assertProviderClient,
   diffPromptContext,
   explainRewindError,
   listSessionSummaries,
@@ -17,6 +24,9 @@ import {
   summarizeSession as summarizeCoreSession,
   unpackSession,
   type EntropyEvent,
+  type ForkOverrides,
+  type ModelCallEvent,
+  type ProviderCodec,
   type RewindEvent,
   type SessionSelectorOptions,
   type SessionSummary,
@@ -27,7 +37,7 @@ import {
 
 const program = new Command();
 
-program.name("agentrewind").alias("arw").description("Inspect and package AgentRewind sessions").version("0.1.1");
+program.name("agentrewind").alias("arw").description("Inspect and package AgentRewind sessions").version("0.1.2");
 
 program
   .command("quickstart")
@@ -136,6 +146,32 @@ program
   });
 
 program
+  .command("fork")
+  .argument("<session>", "session path, session id, store with one session, or latest")
+  .option("--store <dir>", "store used when <session> is an id or latest", ".rewind")
+  .option("--step <n>", "model-call step where the live tail begins", parseInteger)
+  .option("--at <n>", "alias for --step", parseInteger)
+  .option("--from-step <n>", "alias for --step", parseInteger)
+  .option("--site <name>", "model-call site to fork from")
+  .option("--provider <name>", "auto, openai, openai-compatible, openrouter, or anthropic", "auto")
+  .option("--model <id>", "override the model id for live tail model calls")
+  .option("--system <text>", "override the system prompt for live tail model calls")
+  .option("--system-file <file>", "read the replacement system prompt from a file")
+  .option("--api-key-env <name>", "environment variable containing the provider API key")
+  .option("--base-url <url>", "OpenAI-compatible base URL")
+  .option("--base-url-env <name>", "environment variable containing the OpenAI-compatible base URL")
+  .option("--app-url <url>", "OpenRouter attribution URL")
+  .option("--app-title <title>", "OpenRouter attribution title")
+  .option("--app-categories <list>", "comma-separated OpenRouter attribution categories")
+  .option("--tool-miss <policy>", "tail tool miss policy: error or stub", "error")
+  .option("--dry-run", "print the resolved fork plan without calling the provider")
+  .option("--json", "print machine-readable JSON")
+  .description("Fork a recorded run from a model call and execute the tail live")
+  .action(async (session: string, opts: ForkCliOptions) => {
+    await runForkCommand(session, opts);
+  });
+
+program
   .command("tool")
   .argument("<session>")
   .option("--store <dir>", "store used when <session> is an id or latest", ".rewind")
@@ -214,8 +250,430 @@ interface SessionListRow {
   usage: Usage;
 }
 
+type ForkProviderKind = "openai" | "openai-compatible" | "openrouter" | "anthropic";
+type ForkToolMissPolicy = "error" | "stub";
+
+interface ForkCliOptions extends SessionSelectorOptions {
+  step?: number;
+  at?: number;
+  fromStep?: number;
+  site?: string;
+  provider?: string;
+  model?: string;
+  system?: string;
+  systemFile?: string;
+  apiKeyEnv?: string;
+  baseUrl?: string;
+  baseUrlEnv?: string;
+  appUrl?: string;
+  appTitle?: string;
+  appCategories?: string;
+  toolMiss?: string;
+  dryRun?: boolean;
+  json?: boolean;
+}
+
+interface ForkClientConfig {
+  kind: ForkProviderKind;
+  codec: ProviderCodec;
+  model?: unknown;
+  apiKeyEnv?: string;
+  baseURL?: string;
+}
+
+interface ForkStepSelection {
+  step: number;
+  site?: string;
+  model?: string;
+}
+
+interface ForkTraceSummary {
+  modelCalls: number;
+  liveModelCalls: number;
+  recordedModelCalls: number;
+  toolCalls: number;
+  recordedToolCalls: number;
+  entropyDraws: number;
+  liveEntropyDraws: number;
+}
+
 async function resolveSessionSelector(selector: string, opts: SessionSelectorOptions = {}): Promise<string> {
   return resolveSessionPath(selector, opts);
+}
+
+async function runForkCommand(session: string, opts: ForkCliOptions): Promise<void> {
+  const sessionPath = await resolveSessionSelector(session, opts);
+  const stored = await readSession(sessionPath);
+  const selection = selectForkStep(stored.events, opts);
+  const providerKind = resolveForkProvider(stored.meta.provider, opts.provider);
+  const overrides = await readForkOverrides(opts);
+  const toolMiss = parseForkToolMissPolicy(opts.toolMiss ?? "error");
+  const client = createForkClient(providerKind, opts, !opts.dryRun);
+
+  assertForkProviderMatches(stored.meta.provider, client);
+  if (client.model) {
+    assertProviderClient(client.model, client.codec);
+  }
+
+  const plan = {
+    parent: sessionPath,
+    provider: client.codec.name,
+    client: client.kind,
+    atStep: selection.step,
+    site: selection.site,
+    stepModel: selection.model,
+    overrides: summarizeOverrides(overrides),
+    toolMiss,
+    ...(client.apiKeyEnv ? { apiKeyEnv: client.apiKeyEnv } : {}),
+    ...(client.baseURL ? { baseURL: client.baseURL } : {})
+  };
+
+  if (opts.dryRun) {
+    if (opts.json) {
+      console.log(JSON.stringify({ ok: true, dryRun: true, ...plan }, null, 2));
+      return;
+    }
+    console.log(formatForkPlan(plan));
+    return;
+  }
+
+  const replay = await AgentRewind.replay(sessionPath, {
+    codec: client.codec,
+    model: client.model
+  });
+  const result = await replay.fork({
+    atStep: selection.step,
+    model: client.model,
+    overrides,
+    tools: { onMiss: toolMiss }
+  });
+  const child = join(dirname(sessionPath), result.sessionId);
+  const trace = summarizeForkTrace(result.trace.events());
+  const nextCommands = [`agentrewind inspect ${shellArg(child)}`, `agentrewind context ${shellArg(child)}`];
+  const payload = {
+    ok: true,
+    ...plan,
+    child,
+    sessionId: result.sessionId,
+    tokensSpent: result.tokensSpent,
+    ...(result.divergedAtStep === undefined ? {} : { divergedAtStep: result.divergedAtStep }),
+    trace,
+    nextCommands
+  };
+
+  if (opts.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log(formatForkResult(payload));
+}
+
+function selectForkStep(events: RewindEvent[], opts: ForkCliOptions): ForkStepSelection {
+  const explicitStep = selectExplicitForkStep(opts);
+  const modelEvents = events.filter((event): event is ModelCallEvent => event.kind === "model_call");
+
+  if (explicitStep !== undefined) {
+    const event = events.find((candidate) => candidate.step === explicitStep);
+    if (!event) {
+      throw new TypeError(`No recorded boundary step ${explicitStep}. Run agentrewind inspect <session> to choose a step.`);
+    }
+    if (event.kind !== "model_call") {
+      throw new TypeError(`Step ${explicitStep} is ${event.kind}. The fork CLI starts at model_call steps; run agentrewind inspect <session>.`);
+    }
+    if (opts.site && event.callSite !== opts.site) {
+      throw new TypeError(`Step ${explicitStep} has site "${event.callSite}", not "${opts.site}". Use either --step or the matching --site.`);
+    }
+    return { step: event.step, site: event.callSite, model: event.request.model };
+  }
+
+  if (opts.site) {
+    const matches = modelEvents.filter((event) => event.callSite === opts.site);
+    if (matches.length === 0) {
+      throw new TypeError(`No model_call site "${opts.site}" found. Available model sites: ${formatModelStepChoices(modelEvents)}.`);
+    }
+    if (matches.length > 1) {
+      throw new TypeError(`Model-call site "${opts.site}" appears ${matches.length} times. Use --step with one of: ${matches.map((event) => event.step).join(", ")}.`);
+    }
+    const event = matches[0]!;
+    return { step: event.step, site: event.callSite, model: event.request.model };
+  }
+
+  if (modelEvents.length === 1) {
+    const event = modelEvents[0]!;
+    return { step: event.step, site: event.callSite, model: event.request.model };
+  }
+  if (modelEvents.length === 0) {
+    throw new TypeError("This session has no model_call steps to fork from.");
+  }
+  throw new TypeError(`Choose a model call with --site or --step. Available model calls: ${formatModelStepChoices(modelEvents)}.`);
+}
+
+function selectExplicitForkStep(opts: ForkCliOptions): number | undefined {
+  const candidates = [
+    ["--step", opts.step],
+    ["--at", opts.at],
+    ["--from-step", opts.fromStep]
+  ].filter((candidate): candidate is [string, number] => candidate[1] !== undefined);
+  if (candidates.length === 0) {
+    return undefined;
+  }
+  const first = candidates[0]![1];
+  const conflict = candidates.find((candidate) => candidate[1] !== first);
+  if (conflict) {
+    throw new TypeError(`Conflicting fork steps: ${candidates.map(([flag, value]) => `${flag}=${value}`).join(", ")}.`);
+  }
+  return first;
+}
+
+function formatModelStepChoices(events: ModelCallEvent[]): string {
+  return events.map((event) => `step ${event.step}${event.callSite ? ` (${event.callSite})` : ""}`).join(", ");
+}
+
+function resolveForkProvider(sessionProvider: string, requestedProvider = "auto"): ForkProviderKind {
+  const provider = requestedProvider.toLowerCase();
+  switch (provider) {
+    case "auto":
+      if (sessionProvider === "openrouter-chat") return "openrouter";
+      if (sessionProvider === "anthropic") return "anthropic";
+      if (sessionProvider === "openai-chat") return "openai";
+      throw new TypeError(
+        `Cannot infer a built-in fork provider for session provider "${sessionProvider}". Use --provider openai, openai-compatible, openrouter, or anthropic.`
+      );
+    case "openai":
+    case "openai-compatible":
+    case "openrouter":
+    case "anthropic":
+      return provider;
+    case "compatible":
+      return "openai-compatible";
+    case "openai-chat":
+      return "openai";
+    case "openrouter-chat":
+      return "openrouter";
+    default:
+      throw new TypeError(`Unknown fork provider "${requestedProvider}". Use auto, openai, openai-compatible, openrouter, or anthropic.`);
+  }
+}
+
+function createForkClient(provider: ForkProviderKind, opts: ForkCliOptions, requireCredentials: boolean): ForkClientConfig {
+  switch (provider) {
+    case "openai": {
+      const apiKeyEnv = opts.apiKeyEnv ?? "OPENAI_API_KEY";
+      const apiKey = requireCredentials ? requiredEnv(apiKeyEnv, "OpenAI API key") : undefined;
+      return {
+        kind: provider,
+        codec: openaiChatCodec(),
+        ...(apiKey ? { model: new OpenAI({ apiKey }) } : {}),
+        apiKeyEnv
+      };
+    }
+    case "openai-compatible": {
+      const apiKeyEnv = opts.apiKeyEnv ?? "COMPATIBLE_API_KEY";
+      const apiKey = requireCredentials ? requiredEnv(apiKeyEnv, "OpenAI-compatible API key") : undefined;
+      const baseURL = resolveBaseURL(opts, requireCredentials);
+      return {
+        kind: provider,
+        codec: openaiChatCodec(),
+        ...(apiKey ? { model: new OpenAI({ apiKey, baseURL }) } : {}),
+        apiKeyEnv,
+        ...(baseURL ? { baseURL } : {})
+      };
+    }
+    case "openrouter": {
+      const apiKeyEnv = opts.apiKeyEnv ?? "OPENROUTER_API_KEY";
+      const apiKey = requireCredentials ? requiredEnv(apiKeyEnv, "OpenRouter API key") : undefined;
+      return {
+        kind: provider,
+        codec: openRouterChatCodec(),
+        ...(apiKey
+          ? {
+              model: new OpenAI(
+                openRouterClientOptions({
+                  apiKey,
+                  appUrl: opts.appUrl,
+                  appTitle: opts.appTitle,
+                  appCategories: parseCommaList(opts.appCategories)
+                })
+              )
+            }
+          : {}),
+        apiKeyEnv
+      };
+    }
+    case "anthropic": {
+      const apiKeyEnv = opts.apiKeyEnv ?? "ANTHROPIC_API_KEY";
+      const apiKey = requireCredentials ? requiredEnv(apiKeyEnv, "Anthropic API key") : undefined;
+      return {
+        kind: provider,
+        codec: anthropicCodec(),
+        ...(apiKey ? { model: new Anthropic({ apiKey }) } : {}),
+        apiKeyEnv
+      };
+    }
+  }
+}
+
+function resolveBaseURL(opts: ForkCliOptions, required: boolean): string | undefined {
+  if (opts.baseUrl) {
+    return opts.baseUrl;
+  }
+  const envName = opts.baseUrlEnv ?? "COMPATIBLE_BASE_URL";
+  const value = process.env[envName];
+  if (value) {
+    return value;
+  }
+  if (!required) {
+    return undefined;
+  }
+  throw new TypeError(`Missing OpenAI-compatible base URL. Pass --base-url, set ${envName}, or pass --base-url-env <name>.`);
+}
+
+function requiredEnv(name: string, purpose: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new TypeError(`Missing ${purpose}. Set ${name}, or pass --api-key-env <name> to use a different environment variable.`);
+  }
+  return value;
+}
+
+function parseCommaList(value: string | undefined): string[] | undefined {
+  if (!value) {
+    return undefined;
+  }
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function assertForkProviderMatches(sessionProvider: string, client: ForkClientConfig): void {
+  if (sessionProvider === client.codec.name) {
+    return;
+  }
+  throw new TypeError(
+    `Session provider is "${sessionProvider}", but --provider ${client.kind} uses "${client.codec.name}". Use the provider that matches the recording.`
+  );
+}
+
+async function readForkOverrides(opts: ForkCliOptions): Promise<ForkOverrides> {
+  if (opts.system !== undefined && opts.systemFile !== undefined) {
+    throw new TypeError("Use either --system or --system-file, not both.");
+  }
+  const system = opts.systemFile === undefined ? opts.system : await readFile(opts.systemFile, "utf8");
+  return {
+    ...(system === undefined ? {} : { system }),
+    ...(opts.model === undefined ? {} : { model: opts.model })
+  };
+}
+
+function parseForkToolMissPolicy(value: string): ForkToolMissPolicy {
+  switch (value) {
+    case "error":
+    case "stub":
+      return value;
+    default:
+      throw new TypeError(`Unknown --tool-miss policy "${value}". Use error or stub.`);
+  }
+}
+
+function summarizeOverrides(overrides: ForkOverrides): { system: boolean; model?: string } {
+  return {
+    system: overrides.system !== undefined,
+    ...(overrides.model === undefined ? {} : { model: overrides.model })
+  };
+}
+
+function summarizeForkTrace(events: RewindEvent[]): ForkTraceSummary {
+  const summary: ForkTraceSummary = {
+    modelCalls: 0,
+    liveModelCalls: 0,
+    recordedModelCalls: 0,
+    toolCalls: 0,
+    recordedToolCalls: 0,
+    entropyDraws: 0,
+    liveEntropyDraws: 0
+  };
+  for (const event of events) {
+    if (event.kind === "model_call") {
+      summary.modelCalls += 1;
+      if (event.provenance === "live") summary.liveModelCalls += 1;
+      if (event.provenance === "recorded") summary.recordedModelCalls += 1;
+    } else if (event.kind === "tool_call") {
+      summary.toolCalls += 1;
+      if (event.provenance === "recorded") summary.recordedToolCalls += 1;
+    } else if (event.kind === "entropy") {
+      summary.entropyDraws += 1;
+      if (event.provenance === "live") summary.liveEntropyDraws += 1;
+    }
+  }
+  return summary;
+}
+
+function formatForkPlan(plan: {
+  parent: string;
+  provider: string;
+  client: ForkProviderKind;
+  atStep: number;
+  site?: string;
+  stepModel?: string;
+  overrides: { system: boolean; model?: string };
+  toolMiss: ForkToolMissPolicy;
+  apiKeyEnv?: string;
+  baseURL?: string;
+}): string {
+  return [
+    "AgentRewind fork plan.",
+    "",
+    `Parent: ${plan.parent}`,
+    `Fork point: step ${plan.atStep}${plan.site ? ` (${plan.site})` : ""}`,
+    `Provider: ${plan.provider} via ${plan.client}`,
+    ...(plan.stepModel ? [`Recorded model: ${plan.stepModel}`] : []),
+    `Overrides: ${formatOverrides(plan.overrides)}`,
+    `Tool miss policy: ${plan.toolMiss}`,
+    ...(plan.apiKeyEnv ? [`API key env: ${plan.apiKeyEnv}`] : []),
+    ...(plan.baseURL ? [`Base URL: ${plan.baseURL}`] : []),
+    "",
+    "No provider call was made. Remove --dry-run to create the child session."
+  ].join("\n");
+}
+
+function formatForkResult(result: {
+  parent: string;
+  child: string;
+  provider: string;
+  client: ForkProviderKind;
+  atStep: number;
+  site?: string;
+  overrides: { system: boolean; model?: string };
+  toolMiss: ForkToolMissPolicy;
+  tokensSpent: Usage;
+  divergedAtStep?: number;
+  trace: ForkTraceSummary;
+  nextCommands: string[];
+}): string {
+  return [
+    "AgentRewind fork complete.",
+    "",
+    `Parent: ${result.parent}`,
+    `Child: ${result.child}`,
+    `Fork point: step ${result.atStep}${result.site ? ` (${result.site})` : ""}`,
+    `Provider: ${result.provider} via ${result.client}`,
+    `Overrides: ${formatOverrides(result.overrides)}`,
+    `Live tail: ${result.trace.liveModelCalls} model call${result.trace.liveModelCalls === 1 ? "" : "s"}, ${result.trace.recordedToolCalls} recorded tool call${result.trace.recordedToolCalls === 1 ? "" : "s"}`,
+    `Tokens spent: in=${result.tokensSpent.inputTokens} out=${result.tokensSpent.outputTokens}`,
+    `Diverged: ${result.divergedAtStep === undefined ? "no" : `step ${result.divergedAtStep}`}`,
+    "",
+    "Next commands:",
+    ...result.nextCommands.map((command) => `- ${command}`)
+  ].join("\n");
+}
+
+function formatOverrides(overrides: { system: boolean; model?: string }): string {
+  const parts = [overrides.system ? "system=yes" : "system=no"];
+  if (overrides.model !== undefined) {
+    parts.push(`model=${overrides.model}`);
+  }
+  return parts.join(" ");
 }
 
 async function listStoreSessions(store: string): Promise<SessionListRow[]> {
@@ -735,6 +1193,7 @@ function summarizeDoctorSession(meta: Awaited<ReturnType<typeof readSession>>["m
       "agentrewind inspect <session>",
       ...(firstModelStep === undefined || !contextCommand ? [] : [contextCommand]),
       ...(firstModelStep === undefined || secondModelStep === undefined || !diffCommand ? [] : [diffCommand]),
+      ...(firstModelStep === undefined ? [] : [`agentrewind fork <session> --step ${firstModelStep} --system ${shellArg("Updated system prompt")} --dry-run`]),
       "agentrewind pack <session> session.rewind"
     ]
   };

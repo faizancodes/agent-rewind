@@ -116,6 +116,14 @@ timestamps, or model names in `site`.
 
 Forking replays the prefix and sends the tail live:
 
+```sh
+agentrewind inspect .rewind/demo
+agentrewind fork .rewind/demo --site classify-ticket --system "Prioritize escalation accuracy over brevity."
+```
+
+Use the SDK directly when the fork needs current harness code or a goal
+predicate:
+
 ```ts
 const replay = await AgentRewind.replay(".rewind/demo", { codec, model });
 

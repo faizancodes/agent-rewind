@@ -62,6 +62,7 @@ agentrewind inspect .rewind/demo --json
 agentrewind context .rewind/demo
 agentrewind context .rewind/demo --site decision-name
 agentrewind diff .rewind/demo
+agentrewind fork .rewind/demo --site decision-name --system "Try the corrected prompt." --dry-run
 agentrewind pack .rewind/demo demo.rewind
 agentrewind unpack demo.rewind unpacked-demo
 test ! -e unpacked-demo/vault.enc
@@ -72,6 +73,11 @@ model calls. Use `--site`, `--from-site`, and `--to-site` when testing named
 model calls. Use explicit model-call step numbers from `inspect` when a site is
 repeated or you need a specific prompt comparison. Entropy and tool calls may
 appear before model calls.
+
+For CLI fork smoke tests without spending real tokens, run `agentrewind fork`
+with `--dry-run` first. For deterministic CI, point `--provider
+openai-compatible --base-url <local-test-server>` at a local OpenAI-compatible
+test endpoint and use `--api-key-env` with a throwaway env var.
 
 ## Live Smoke Env File
 

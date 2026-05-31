@@ -24,6 +24,8 @@ agentrewind context <session> --site <name>
 agentrewind diff <session>
 agentrewind diff <session> --from <a> --to <b>
 agentrewind diff <session> --from-site <a> --to-site <b>
+agentrewind fork <session> --site <name> --system "Updated system prompt"
+agentrewind fork latest --store .rewind --step <n> --model <model-id>
 agentrewind tool <session>
 agentrewind tool <session> --name <tool>
 agentrewind tool <session> --step <n>
@@ -72,6 +74,14 @@ arw inspect <session>
   Pass `--site`, `--from-site`, or `--to-site` when you know the stable `site`
   name from your harness. Pass `--step`, `--from`, or `--to` when you need a
   specific numeric step from `inspect`.
+- `fork` starts at a recorded model-call step, reuses the recorded prefix, and
+  sends the tail to a live provider client. Pick the fork point with `--site` or
+  `--step`, change the live tail with `--system` and/or `--model`, and add
+  `--dry-run` to verify the plan without spending provider tokens. Built-in
+  providers are `openai`, `openai-compatible`, `openrouter`, and `anthropic`.
+  API keys are read from `OPENAI_API_KEY`, `COMPATIBLE_API_KEY`,
+  `OPENROUTER_API_KEY`, or `ANTHROPIC_API_KEY`; generic compatible endpoints
+  also need `COMPATIBLE_BASE_URL` or `--base-url`.
 - `tool` prints a recorded tool call as JSON, including `args`, `result`,
   `error`, stream chunks, latency, and provenance. Use `--name` when the tool
   appears once, or `--step` after `inspect` when a tool appears more than once.
@@ -83,5 +93,5 @@ arw inspect <session>
 - Session read failures are formatted as AgentRewind errors. If a command cannot
   identify the session, run `agentrewind list .rewind`, pass a full session
   directory such as `.rewind/<session-id>`, or pass `<session-id> --store .rewind`.
-- Recording, replay, and fork are programmatic because they need your harness
-  code.
+- Recording and harness-aware replay/fork experiments are programmatic because
+  they need your harness code.

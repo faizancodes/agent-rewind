@@ -147,6 +147,25 @@ pnpm check
 Use fork when you want to replay everything before a decision and try a live
 tail with new prompt or model settings.
 
+For common provider-backed experiments, start with the CLI:
+
+```sh
+agentrewind inspect .rewind/support-bot
+agentrewind fork .rewind/support-bot \
+  --site classify-ticket \
+  --system "Prioritize escalation accuracy over brevity." \
+  --dry-run
+agentrewind fork .rewind/support-bot \
+  --site classify-ticket \
+  --system "Prioritize escalation accuracy over brevity."
+```
+
+The fork command creates a child session and prints the follow-up `inspect` and
+`context` commands. It reads provider keys from environment variables, so keep
+keys outside shell history by using env vars instead of command-line flags.
+
+Use the SDK when the fork needs current harness code or a goal predicate:
+
 ```ts
 const replay = await AgentRewind.replay(".rewind/support-bot", {
   codec

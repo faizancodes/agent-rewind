@@ -514,6 +514,7 @@ agentrewind inspect .rewind/openai-demo
 agentrewind inspect .rewind/openai-demo --json
 agentrewind context .rewind/openai-demo
 agentrewind context .rewind/openai-demo --site answer-question
+agentrewind fork .rewind/openai-demo --site answer-question --system "Prefer policy-backed answers."
 agentrewind entropy .rewind/openai-demo --source uuid
 agentrewind pack .rewind/openai-demo openai-demo.rewind
 agentrewind unpack openai-demo.rewind unpacked-demo
@@ -548,10 +549,44 @@ provenance as JSON. Use `--name` when the tool appears once, or `--step` after
 as JSON. Use `--source` when that source appears once, or `--step` after
 `inspect` when the same source appears multiple times.
 
+`fork` starts from a recorded model call, reuses the recorded prefix, and sends
+the tail to a live provider client. Pick the model call with `--site` or
+`--step`, then change the live tail with `--system` and/or `--model`:
+
+```sh
+agentrewind fork latest \
+  --store .rewind \
+  --site answer-question \
+  --system "Prefer concise, policy-backed answers." \
+  --model gpt-5.5
+```
+
+Provider credentials are read from environment variables: `OPENAI_API_KEY`,
+`OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or `COMPATIBLE_API_KEY` plus
+`COMPATIBLE_BASE_URL` for generic OpenAI-compatible endpoints. Use
+`--provider openrouter`, `--provider anthropic`, or `--provider openai-compatible`
+when auto-detection is not specific enough. Add `--dry-run` to verify the fork
+point and provider setup without spending tokens.
+
 ## Forking
 
 Forking replays the prefix of a session and sends the tail live. Use it to test
 prompt/model overrides from a known decision point.
+
+For the common provider-backed workflow, use the CLI:
+
+```sh
+agentrewind inspect .rewind/openai-demo
+agentrewind fork .rewind/openai-demo \
+  --site answer-question \
+  --system "Prefer concise, policy-backed answers." \
+  --model gpt-5.5
+agentrewind inspect .rewind/<child-session-id>
+```
+
+The command writes a child session next to the parent and prints follow-up
+`inspect` / `context` commands. Use the SDK API when the fork needs your current
+harness code, a custom goal predicate, or custom tool policy:
 
 ```ts
 const replay = await AgentRewind.replay(".rewind/openai-demo", { codec });
@@ -701,8 +736,9 @@ pnpm examples:run
 pnpm check
 ```
 
-`@agentrewind/core` has no runtime package dependencies; provider SDKs live in
-codec packages as peer dependencies.
+`@agentrewind/core` has no runtime package dependencies. The SDK and CLI include
+the built-in provider codecs and provider SDK clients needed for the one-install
+workflow.
 
 ## Current Boundaries
 

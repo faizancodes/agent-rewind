@@ -1,6 +1,6 @@
 {
   "name": "@agentrewind/cli",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "AgentRewind command-line tools for inspecting, diffing, packing, and unpacking sessions.",
   "type": "module",
   "keywords": [
@@ -36,8 +36,13 @@
     "access": "public"
   },
   "dependencies": {
+    "@agentrewind/codec-anthropic": "workspace:*",
+    "@agentrewind/codec-openai": "workspace:*",
+    "@agentrewind/codec-openrouter": "workspace:*",
     "@agentrewind/core": "workspace:*",
-    "commander": "^15.0.0"
+    "@anthropic-ai/sdk": "^0.100.1",
+    "commander": "^15.0.0",
+    "openai": "^6.39.1"
   },
   "repository": {
     "type": "git",
