@@ -16,7 +16,7 @@ Use `assertReplay()` when the test only needs to prove that the current harness
 still matches a stored recording:
 
 ```ts
-import { defineHarness } from "agentrewind";
+import { defineHarness } from "@agentrewind/sdk";
 import { assertReplay } from "@agentrewind/test";
 import { openaiChatCodec } from "@agentrewind/codec-openai";
 
@@ -42,7 +42,7 @@ Use `fromSession()` when the test needs to inspect recorded events before
 running the replay assertion:
 
 ```ts
-import { defineHarness } from "agentrewind";
+import { defineHarness } from "@agentrewind/sdk";
 import { fromSession } from "@agentrewind/test";
 import { openaiChatCodec } from "@agentrewind/codec-openai";
 

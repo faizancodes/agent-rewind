@@ -35,8 +35,8 @@ agentrewind/
   tsconfig.base.json
   vitest.config.ts
   packages/
-    agentrewind/                   # umbrella: re-exports @agentrewind/core public API
-      package.json                 # name "agentrewind"; depends on core; bin -> cli
+    sdk/                           # umbrella: re-exports @agentrewind/core public API
+      package.json                 # name "@agentrewind/sdk"; depends on core; bin -> cli
     core/                          # @agentrewind/core
       src/
         index.ts                   # public API surface (§6)
@@ -537,4 +537,4 @@ Tests:
 
 ## 15. Definition of done (MVP)
 
-All M1–M4 tests pass; `examples/sample-agent` runs end-to-end; `agentrewind` (umbrella) installs and exposes the §6 API; the CLI binary works; `@agentrewind/core` has zero runtime dependencies. M5 is desirable but not blocking.
+All M1–M4 tests pass; `examples/sample-agent` runs end-to-end; `@agentrewind/sdk` (umbrella) installs and exposes the §6 API; the CLI binary works; `@agentrewind/core` has zero runtime dependencies. M5 is desirable but not blocking.

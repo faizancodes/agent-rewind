@@ -2,7 +2,7 @@
 
 Dependency-free Node 20 ESM runtime for AgentRewind.
 
-Most users should install the umbrella package, `agentrewind`, plus one provider
+Most users should install the umbrella package, `@agentrewind/sdk`, plus one provider
 codec. Use `@agentrewind/core` directly when you want the runtime without the
 CLI package.
 

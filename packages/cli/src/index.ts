@@ -427,7 +427,7 @@ function formatQuickstart(inputProvider: string | undefined, manager: string, fo
 
 function starterTypeScript(spec: QuickstartSpec, provider: QuickstartProvider): string {
   return [
-    "import { AgentRewind, assertProviderClient, defineHarness, explainRewindError } from \"agentrewind\";",
+    "import { AgentRewind, assertProviderClient, defineHarness, explainRewindError } from \"@agentrewind/sdk\";",
     spec.imports,
     "",
     "// Fail locally before recording if the provider key, base URL, or model id",
@@ -575,7 +575,7 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         provider,
         title: "AgentRewind OpenAI Chat Completions Quickstart",
         site: "answer-question",
-        install: ["agentrewind", "@agentrewind/codec-openai", "openai"],
+        install: ["@agentrewind/sdk", "@agentrewind/codec-openai", "openai"],
         env: ["OPENAI_API_KEY=...", "OPENAI_MODEL=..."],
         imports: [
           "import OpenAI from \"openai\";",
@@ -592,7 +592,7 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         provider,
         title: "AgentRewind OpenAI-Compatible Provider Quickstart",
         site: "answer-question",
-        install: ["agentrewind", "@agentrewind/codec-openai", "openai"],
+        install: ["@agentrewind/sdk", "@agentrewind/codec-openai", "openai"],
         env: ["COMPATIBLE_API_KEY=...", "COMPATIBLE_BASE_URL=https://your-provider.example/v1", "COMPATIBLE_MODEL=..."],
         imports: [
           "import OpenAI from \"openai\";",
@@ -614,7 +614,7 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         provider,
         title: "AgentRewind OpenRouter Quickstart",
         site: "openrouter-answer",
-        install: ["agentrewind", "@agentrewind/codec-openrouter", "openai"],
+        install: ["@agentrewind/sdk", "@agentrewind/codec-openrouter", "openai"],
         env: ["OPENROUTER_API_KEY=...", "OPENROUTER_MODEL=..."],
         imports: [
           "import OpenAI from \"openai\";",
@@ -639,7 +639,7 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         provider,
         title: "AgentRewind Anthropic Messages Quickstart",
         site: "draft-answer",
-        install: ["agentrewind", "@agentrewind/codec-anthropic", "@anthropic-ai/sdk"],
+        install: ["@agentrewind/sdk", "@agentrewind/codec-anthropic", "@anthropic-ai/sdk"],
         env: ["ANTHROPIC_API_KEY=...", "ANTHROPIC_MODEL=..."],
         imports: [
           "import Anthropic from \"@anthropic-ai/sdk\";",

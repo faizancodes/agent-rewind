@@ -14,15 +14,15 @@ continuing.
 Choose the provider codec that matches the SDK client your agent uses:
 
 ```sh
-pnpm add agentrewind @agentrewind/codec-openai openai
-pnpm add agentrewind @agentrewind/codec-openrouter openai
-pnpm add agentrewind @agentrewind/codec-anthropic @anthropic-ai/sdk
+pnpm add @agentrewind/sdk @agentrewind/codec-openai openai
+pnpm add @agentrewind/sdk @agentrewind/codec-openrouter openai
+pnpm add @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
 ```
 
 ```sh
-npm install agentrewind @agentrewind/codec-openai openai
-npm install agentrewind @agentrewind/codec-openrouter openai
-npm install agentrewind @agentrewind/codec-anthropic @anthropic-ai/sdk
+npm install @agentrewind/sdk @agentrewind/codec-openai openai
+npm install @agentrewind/sdk @agentrewind/codec-openrouter openai
+npm install @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
 ```
 
 AgentRewind is ESM-only and requires Node 20 or newer.
@@ -53,7 +53,7 @@ agentrewind quickstart openai --out agentrewind-openai.ts
 
 | Package | Use it for |
 | --- | --- |
-| `agentrewind` | Umbrella package that re-exports `@agentrewind/core` and installs the `agentrewind` / `arw` CLI. |
+| `@agentrewind/sdk` | Umbrella package that re-exports `@agentrewind/core` and installs the `agentrewind` / `arw` CLI. |
 | `@agentrewind/core` | Dependency-free runtime for record, replay, fork, session storage, redaction, and inspection helpers. |
 | `@agentrewind/codec-openai` | OpenAI-compatible Chat Completions clients using `chat.completions.create()` and `chat.completions.stream()`. |
 | `@agentrewind/codec-openrouter` | First-class OpenRouter Chat Completions support using the OpenAI SDK with OpenRouter defaults and attribution headers. |
@@ -129,7 +129,7 @@ with a custom `baseURL`.
 
 ```ts
 import OpenAI from "openai";
-import { AgentRewind, assertProviderClient, defineHarness } from "agentrewind";
+import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
 import { openaiChatCodec } from "@agentrewind/codec-openai";
 import type { ChatCompletion, ChatCompletionChunk } from "openai/resources/chat/completions";
 
@@ -238,7 +238,7 @@ their own provider identity and client setup helper.
 
 ```ts
 import OpenAI from "openai";
-import { AgentRewind, assertProviderClient, defineHarness } from "agentrewind";
+import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
 import { openRouterChatCodec, openRouterClientOptions } from "@agentrewind/codec-openrouter";
 import type { ChatCompletion } from "openai/resources/chat/completions";
 
@@ -287,7 +287,7 @@ const replayed = await AgentRewind.replayRun(recorded.path, { codec }, harness);
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { AgentRewind, assertProviderClient, defineHarness } from "agentrewind";
+import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
 import { anthropicCodec } from "@agentrewind/codec-anthropic";
 import type { Message } from "@anthropic-ai/sdk/resources/messages/messages";
 
@@ -336,7 +336,7 @@ the live handler and stores the result. Strict replay serves the recorded result
 without calling the handler again.
 
 ```ts
-import { defineHarness, defineTools } from "agentrewind";
+import { defineHarness, defineTools } from "@agentrewind/sdk";
 
 const tools = defineTools({
   lookupCustomer: async (args: { customerId: string }) => {
@@ -424,7 +424,7 @@ For readable test output and app logs, format AgentRewind errors with
 `explainRewindError()`:
 
 ```ts
-import { AgentRewind, explainRewindError } from "agentrewind";
+import { AgentRewind, explainRewindError } from "@agentrewind/sdk";
 
 try {
   await AgentRewind.replayRun(".rewind/openai-demo", { codec }, harness);

@@ -5,7 +5,7 @@ Use this reference when modifying an agent codebase.
 ## Minimal Record/Replay Shape
 
 ```ts
-import { AgentRewind, assertProviderClient, defineHarness } from "agentrewind";
+import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
 
 assertProviderClient(model, codec);
 
@@ -39,7 +39,7 @@ const replayed = await AgentRewind.replayRun(recorded.path, { codec }, harness);
 External I/O that affects prompts or control flow should be a tool:
 
 ```ts
-import { defineHarness, defineTools } from "agentrewind";
+import { defineHarness, defineTools } from "@agentrewind/sdk";
 
 const tools = defineTools({
   lookupCustomer: async (args: { customerId: string }) => {

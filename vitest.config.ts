@@ -8,7 +8,7 @@ export default defineConfig({
       "@agentrewind/codec-openai": new URL("./packages/codec-openai/src/index.ts", import.meta.url).pathname,
       "@agentrewind/codec-openrouter": new URL("./packages/codec-openrouter/src/index.ts", import.meta.url).pathname,
       "@agentrewind/test": new URL("./packages/test/src/index.ts", import.meta.url).pathname,
-      agentrewind: new URL("./packages/agentrewind/src/index.ts", import.meta.url).pathname
+      "@agentrewind/sdk": new URL("./packages/sdk/src/index.ts", import.meta.url).pathname
     }
   },
   test: {

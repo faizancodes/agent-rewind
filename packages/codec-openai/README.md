@@ -8,8 +8,8 @@ OpenAI-compatible providers configured with a custom `baseURL`.
 ## Install
 
 ```sh
-pnpm add agentrewind @agentrewind/codec-openai openai
-npm install agentrewind @agentrewind/codec-openai openai
+pnpm add @agentrewind/sdk @agentrewind/codec-openai openai
+npm install @agentrewind/sdk @agentrewind/codec-openai openai
 ```
 
 ## Supported Client Shape
@@ -35,7 +35,7 @@ const client = new OpenAI({
 
 ```ts
 import OpenAI from "openai";
-import { AgentRewind, assertProviderClient, defineHarness } from "agentrewind";
+import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
 import { openaiChatCodec } from "@agentrewind/codec-openai";
 import type { ChatCompletion, ChatCompletionChunk } from "openai/resources/chat/completions";
 

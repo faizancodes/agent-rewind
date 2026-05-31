@@ -43,7 +43,7 @@ Use this sequence for most code changes:
    ```
 5. Define a harness:
    ```ts
-   import { assertProviderClient, defineHarness, defineTools } from "agentrewind";
+   import { assertProviderClient, defineHarness, defineTools } from "@agentrewind/sdk";
 
    assertProviderClient(model, codec);
 

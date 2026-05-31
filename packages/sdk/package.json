@@ -1,5 +1,5 @@
 {
-  "name": "agentrewind",
+  "name": "@agentrewind/sdk",
   "version": "0.1.0",
   "description": "Umbrella package for recording, replaying, inspecting, and forking LLM-agent runs.",
   "type": "module",
@@ -31,6 +31,9 @@
   "scripts": {
     "build": "tsup src/index.ts src/cli.ts --format esm --dts --target node20 --tsconfig ../../tsconfig.base.json",
     "prepack": "pnpm build"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@agentrewind/cli": "workspace:*",

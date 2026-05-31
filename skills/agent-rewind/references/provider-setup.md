@@ -5,15 +5,15 @@ Use this reference when choosing or wiring the provider codec.
 ## Install Matrix
 
 ```sh
-pnpm add agentrewind @agentrewind/codec-openai openai
-pnpm add agentrewind @agentrewind/codec-openrouter openai
-pnpm add agentrewind @agentrewind/codec-anthropic @anthropic-ai/sdk
+pnpm add @agentrewind/sdk @agentrewind/codec-openai openai
+pnpm add @agentrewind/sdk @agentrewind/codec-openrouter openai
+pnpm add @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
 ```
 
 ```sh
-npm install agentrewind @agentrewind/codec-openai openai
-npm install agentrewind @agentrewind/codec-openrouter openai
-npm install agentrewind @agentrewind/codec-anthropic @anthropic-ai/sdk
+npm install @agentrewind/sdk @agentrewind/codec-openai openai
+npm install @agentrewind/sdk @agentrewind/codec-openrouter openai
+npm install @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
 ```
 
 AgentRewind is ESM-only and requires Node 20 or newer.
@@ -22,7 +22,7 @@ AgentRewind is ESM-only and requires Node 20 or newer.
 
 ```ts
 import OpenAI from "openai";
-import { AgentRewind } from "agentrewind";
+import { AgentRewind } from "@agentrewind/sdk";
 import { openaiChatCodec } from "@agentrewind/codec-openai";
 
 const model = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });

@@ -1,4 +1,4 @@
-# agentrewind
+# @agentrewind/sdk
 
 Umbrella package for AgentRewind.
 
@@ -8,14 +8,14 @@ This package re-exports the public `@agentrewind/core` API and installs the
 Install it with the provider codec your agent needs:
 
 ```sh
-pnpm add agentrewind @agentrewind/codec-openai openai
-pnpm add agentrewind @agentrewind/codec-openrouter openai
-pnpm add agentrewind @agentrewind/codec-anthropic @anthropic-ai/sdk
+pnpm add @agentrewind/sdk @agentrewind/codec-openai openai
+pnpm add @agentrewind/sdk @agentrewind/codec-openrouter openai
+pnpm add @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
 ```
 
 ```ts
 import OpenAI from "openai";
-import { AgentRewind, assertProviderClient, defineHarness, defineTools } from "agentrewind";
+import { AgentRewind, assertProviderClient, defineHarness, defineTools } from "@agentrewind/sdk";
 import { openaiChatCodec } from "@agentrewind/codec-openai";
 import type { ChatCompletion } from "openai/resources/chat/completions";
 

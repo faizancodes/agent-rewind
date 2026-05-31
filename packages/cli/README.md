@@ -2,7 +2,7 @@
 
 Command-line inspection and packaging tools for AgentRewind sessions.
 
-The umbrella package `agentrewind` installs the same binaries, so most users do
+The umbrella package `@agentrewind/sdk` installs the same binaries, so most users do
 not need to install this package directly.
 
 ## Commands

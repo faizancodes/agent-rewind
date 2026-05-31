@@ -8,8 +8,8 @@ Messages API.
 ## Install
 
 ```sh
-pnpm add agentrewind @agentrewind/codec-anthropic @anthropic-ai/sdk
-npm install agentrewind @agentrewind/codec-anthropic @anthropic-ai/sdk
+pnpm add @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
+npm install @agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk
 ```
 
 ## Supported Client Shape
@@ -23,7 +23,7 @@ The codec wraps:
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { AgentRewind, assertProviderClient, defineHarness } from "agentrewind";
+import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
 import { anthropicCodec } from "@agentrewind/codec-anthropic";
 import type { Message, RawMessageStreamEvent } from "@anthropic-ai/sdk/resources/messages/messages";
 

@@ -2,7 +2,7 @@
 
 This workspace publishes seven packages:
 
-- `agentrewind`
+- `@agentrewind/sdk`
 - `@agentrewind/core`
 - `@agentrewind/cli`
 - `@agentrewind/test`

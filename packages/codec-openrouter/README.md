@@ -10,15 +10,15 @@ option helper.
 ## Install
 
 ```sh
-pnpm add agentrewind @agentrewind/codec-openrouter openai
-npm install agentrewind @agentrewind/codec-openrouter openai
+pnpm add @agentrewind/sdk @agentrewind/codec-openrouter openai
+npm install @agentrewind/sdk @agentrewind/codec-openrouter openai
 ```
 
 ## Recording
 
 ```ts
 import OpenAI from "openai";
-import { AgentRewind, assertProviderClient, defineHarness } from "agentrewind";
+import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
 import { openRouterChatCodec, openRouterClientOptions } from "@agentrewind/codec-openrouter";
 import type { ChatCompletion } from "openai/resources/chat/completions";
 

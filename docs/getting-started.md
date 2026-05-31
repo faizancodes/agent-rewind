@@ -22,10 +22,10 @@ calling the live model or tools again.
 
 | Your model client | Install | Codec |
 | --- | --- | --- |
-| OpenAI Chat Completions | `agentrewind @agentrewind/codec-openai openai` | `openaiChatCodec()` |
-| OpenAI-compatible `baseURL` provider | `agentrewind @agentrewind/codec-openai openai` | `openaiChatCodec()` |
-| OpenRouter through the OpenAI SDK | `agentrewind @agentrewind/codec-openrouter openai` | `openRouterChatCodec()` |
-| Anthropic Messages | `agentrewind @agentrewind/codec-anthropic @anthropic-ai/sdk` | `anthropicCodec()` |
+| OpenAI Chat Completions | `@agentrewind/sdk @agentrewind/codec-openai openai` | `openaiChatCodec()` |
+| OpenAI-compatible `baseURL` provider | `@agentrewind/sdk @agentrewind/codec-openai openai` | `openaiChatCodec()` |
+| OpenRouter through the OpenAI SDK | `@agentrewind/sdk @agentrewind/codec-openrouter openai` | `openRouterChatCodec()` |
+| Anthropic Messages | `@agentrewind/sdk @agentrewind/codec-anthropic @anthropic-ai/sdk` | `anthropicCodec()` |
 
 AgentRewind does not wrap arbitrary `fetch` calls. If an external operation
 affects prompts, tool arguments, or branching, model it as a tool.
@@ -52,7 +52,7 @@ agentrewind quickstart openrouter --out agentrewind-openrouter.ts
 ## Minimal Shape
 
 ```ts
-import { AgentRewind, assertProviderClient, defineHarness } from "agentrewind";
+import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
 import { openaiChatCodec } from "@agentrewind/codec-openai";
 
 const codec = openaiChatCodec();
@@ -94,7 +94,7 @@ Start with one model call. Then move prompt-affecting external work behind
 tools:
 
 ```ts
-import { defineHarness, defineTools } from "agentrewind";
+import { defineHarness, defineTools } from "@agentrewind/sdk";
 
 const tools = defineTools({
   lookupCustomer: async (args: { customerId: string }) => {
@@ -259,7 +259,7 @@ need the codec to fingerprint current requests and prepare live fork requests.
 When replay fails, use `explainRewindError()` before looking at raw JSON:
 
 ```ts
-import { AgentRewind, explainRewindError } from "agentrewind";
+import { AgentRewind, explainRewindError } from "@agentrewind/sdk";
 
 try {
   await AgentRewind.replayRun(".rewind/first-recording", { codec }, harness);

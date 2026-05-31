@@ -20,7 +20,7 @@
       "@agentrewind/codec-openai": ["packages/codec-openai/src/index.ts"],
       "@agentrewind/codec-openrouter": ["packages/codec-openrouter/src/index.ts"],
       "@agentrewind/test": ["packages/test/src/index.ts"],
-      "agentrewind": ["packages/agentrewind/src/index.ts"]
+      "@agentrewind/sdk": ["packages/sdk/src/index.ts"]
     }
   },
   "include": ["packages/**/*.ts", "vitest.config.ts", "examples/**/*.ts"]

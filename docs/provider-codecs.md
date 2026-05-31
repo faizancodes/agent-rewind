@@ -72,7 +72,7 @@ const model = new OpenAI({
 Then use `openaiChatCodec()` in both record and replay:
 
 ```ts
-import { AgentRewind, assertProviderClient } from "agentrewind";
+import { AgentRewind, assertProviderClient } from "@agentrewind/sdk";
 import { openaiChatCodec } from "@agentrewind/codec-openai";
 
 const codec = openaiChatCodec();
@@ -98,7 +98,7 @@ provider name and provides OpenRouter defaults:
 
 ```ts
 import OpenAI from "openai";
-import { AgentRewind, assertProviderClient } from "agentrewind";
+import { AgentRewind, assertProviderClient } from "@agentrewind/sdk";
 import { openRouterChatCodec, openRouterClientOptions } from "@agentrewind/codec-openrouter";
 
 const model = new OpenAI(
@@ -129,7 +129,7 @@ Use `anthropicCodec()` with an Anthropic SDK client:
 
 ```ts
 import Anthropic from "@anthropic-ai/sdk";
-import { AgentRewind, assertProviderClient } from "agentrewind";
+import { AgentRewind, assertProviderClient } from "@agentrewind/sdk";
 import { anthropicCodec } from "@agentrewind/codec-anthropic";
 
 const model = new Anthropic({
@@ -157,7 +157,7 @@ codec. During setup, call `assertProviderCodec(codec)` before recording if the
 codec is assembled dynamically or lives in your application code:
 
 ```ts
-import { assertProviderCodec } from "agentrewind";
+import { assertProviderCodec } from "@agentrewind/sdk";
 
 const codec = myProviderCodec();
 assertProviderCodec(codec);

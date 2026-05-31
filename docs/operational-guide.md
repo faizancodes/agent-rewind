@@ -69,7 +69,7 @@ the provider codec's `normalizeRequest()` and `normalizeResponse()`.
 Use `explainRewindError()` anywhere drift might appear in CI or logs:
 
 ```ts
-import { AgentRewind, explainRewindError } from "agentrewind";
+import { AgentRewind, explainRewindError } from "@agentrewind/sdk";
 
 try {
   await AgentRewind.replayRun(".rewind/support-bot", { codec }, harness);

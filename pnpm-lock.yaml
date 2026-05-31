@@ -21,15 +21,6 @@ importers:
         specifier: ^4.1.7
         version: 4.1.7(@types/node@25.9.1)(vite@8.0.14(@types/node@25.9.1)(esbuild@0.27.7))
 
-  packages/agentrewind:
-    dependencies:
-      '@agentrewind/cli':
-        specifier: workspace:*
-        version: link:../cli
-      '@agentrewind/core':
-        specifier: workspace:*
-        version: link:../core
-
   packages/cli:
     dependencies:
       '@agentrewind/core':
@@ -73,6 +64,15 @@ importers:
         version: 6.39.1
 
   packages/core: {}
+
+  packages/sdk:
+    dependencies:
+      '@agentrewind/cli':
+        specifier: workspace:*
+        version: link:../cli
+      '@agentrewind/core':
+        specifier: workspace:*
+        version: link:../core
 
   packages/test:
     dependencies:
