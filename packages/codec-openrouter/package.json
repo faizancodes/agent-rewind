@@ -35,10 +35,18 @@
     "openai": "*"
   },
   "dependencies": {
-    "@agentrewind/core": "workspace:*",
-    "@agentrewind/codec-openai": "workspace:*"
+    "@agentrewind/codec-openai": "workspace:*",
+    "@agentrewind/core": "workspace:*"
   },
   "devDependencies": {
     "openai": "^6.39.1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faizancodes/agent-rewind.git"
+  },
+  "homepage": "https://github.com/faizancodes/agent-rewind#readme",
+  "bugs": {
+    "url": "https://github.com/faizancodes/agent-rewind/issues"
   }
 }

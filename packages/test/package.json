@@ -20,7 +20,9 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup src/index.ts --format esm --dts --target node20 --tsconfig ../../tsconfig.base.json",
     "prepack": "pnpm build"
@@ -31,5 +33,12 @@
   "dependencies": {
     "@agentrewind/core": "workspace:*"
   },
-  "devDependencies": {}
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faizancodes/agent-rewind.git"
+  },
+  "homepage": "https://github.com/faizancodes/agent-rewind#readme",
+  "bugs": {
+    "url": "https://github.com/faizancodes/agent-rewind/issues"
+  }
 }

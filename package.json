@@ -23,5 +23,13 @@
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vitest": "^4.1.7"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faizancodes/agent-rewind.git"
+  },
+  "homepage": "https://github.com/faizancodes/agent-rewind#readme",
+  "bugs": {
+    "url": "https://github.com/faizancodes/agent-rewind/issues"
   }
 }

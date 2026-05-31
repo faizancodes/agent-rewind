@@ -25,7 +25,9 @@
     "agentrewind": "./dist/cli.js",
     "arw": "./dist/cli.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup src/index.ts src/cli.ts --format esm --dts --target node20 --tsconfig ../../tsconfig.base.json",
     "prepack": "pnpm build"
@@ -34,5 +36,12 @@
     "@agentrewind/cli": "workspace:*",
     "@agentrewind/core": "workspace:*"
   },
-  "devDependencies": {}
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/faizancodes/agent-rewind.git"
+  },
+  "homepage": "https://github.com/faizancodes/agent-rewind#readme",
+  "bugs": {
+    "url": "https://github.com/faizancodes/agent-rewind/issues"
+  }
 }
