@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import Anthropic from "@anthropic-ai/sdk";
-import { AgentRewind } from "@agentrewind/core";
+import { AgentRewind, type ProviderCodec } from "@agentrewind/core";
 import { anthropicCodec } from "../src/index.js";
 
 describe("anthropicCodec", () => {
@@ -138,12 +138,12 @@ describe("anthropicCodec", () => {
       id: "anthropic-fork",
       store,
       model: recordModel,
-      codec
+      codec: codec as ProviderCodec
     });
     expect(await record.run(harness)).toBe("deny");
     await record.close();
 
-    const replay = await AgentRewind.replay(join(store, "anthropic-fork"), { codec });
+    const replay = await AgentRewind.replay(join(store, "anthropic-fork"), { codec: codec as ProviderCodec });
     expect(await replay.run(harness)).toBe("deny");
     const modelStep = replay.events().find((event) => event.kind === "model_call")?.step;
     expect(modelStep).toBeDefined();
@@ -187,7 +187,7 @@ describe("anthropicCodec", () => {
       counts: { modelCalls: 1 }
     });
 
-    const childReplay = await AgentRewind.replay(join(store, fork.sessionId), { codec });
+    const childReplay = await AgentRewind.replay(join(store, fork.sessionId), { codec: codec as ProviderCodec });
     await childReplay.run(async (ctx) => {
       const message = await ctx.model.create<AnthropicMessageFixture>(liveRequests[0], { site: "refund-decision" });
       expect(textFromAnthropicMessage(message)).toBe("approve");
@@ -213,12 +213,12 @@ describe("anthropicCodec", () => {
       id: "live-anthropic-fork",
       store,
       model,
-      codec
+      codec: codec as ProviderCodec
     });
     const recorded = await record.run(harness);
     await record.close();
 
-    const replay = await AgentRewind.replay(join(store, "live-anthropic-fork"), { codec });
+    const replay = await AgentRewind.replay(join(store, "live-anthropic-fork"), { codec: codec as ProviderCodec });
     await expect(replay.run(harness)).resolves.toBe(recorded);
     const modelStep = replay.events().find((event) => event.kind === "model_call")?.step;
     expect(modelStep).toBeDefined();

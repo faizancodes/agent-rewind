@@ -11,8 +11,8 @@ reproduce:
 
 - model calls through `ctx.model.create()` or `ctx.model.stream()`
 - tool calls through `ctx.tools.*`
-- prompt-affecting entropy through `ctx.uuid()`, `ctx.clock()`, and
-  `ctx.random()`
+- prompt-affecting entropy through `ctx.uuid()`, `ctx.clock()`,
+  `ctx.random()`, and `ctx.env(key)`
 
 Record mode calls the live model and tools, then writes a session to disk.
 Strict replay runs the same harness and serves recorded outputs instead of
@@ -25,14 +25,15 @@ npm install @agentrewind/sdk
 ```
 
 That one package includes the SDK runtime, CLI, built-in provider codecs,
-OpenAI client, Anthropic client, and replay test helpers. Pick the codec helper
-that matches your model client:
+OpenAI client, Anthropic client, and replay test helpers. Prefer a provider
+preset when one matches your model client:
 
-| Model client | Codec |
+| Model client | Preset |
 | --- | --- |
-| OpenAI Chat Completions or compatible `baseURL` provider | `openaiChatCodec()` |
-| OpenRouter through the OpenAI SDK | `openRouterChatCodec()` |
-| Anthropic Messages | `anthropicCodec()` |
+| OpenAI Chat Completions | `createOpenAIRewind()` |
+| OpenAI-compatible `baseURL` provider | `createOpenAICompatibleRewind()` |
+| OpenRouter through the OpenAI SDK | `createOpenRouterRewind()` |
+| Anthropic Messages | `createAnthropicRewind()` |
 
 AgentRewind does not wrap arbitrary `fetch` calls. If an external operation
 affects prompts, tool arguments, or branching, model it as a tool.
@@ -59,11 +60,10 @@ agentrewind quickstart openrouter --out agentrewind-openrouter.ts
 ## Minimal Shape
 
 ```ts
-import { AgentRewind, assertProviderClient, defineHarness, openaiChatCodec } from "@agentrewind/sdk";
+import { createOpenAIRewind, defineHarness } from "@agentrewind/sdk";
 
-const codec = openaiChatCodec();
 const chatModel = process.env.OPENAI_MODEL ?? "gpt-5.5";
-assertProviderClient(model, codec);
+const rewind = createOpenAIRewind({ store: ".rewind" });
 
 const harness = defineHarness(async (ctx) => {
   const completion = await ctx.model.create(
@@ -81,17 +81,9 @@ const harness = defineHarness(async (ctx) => {
   return completion.choices[0]?.message.content ?? "";
 });
 
-const recorded = await AgentRewind.recordRun(
-  {
-    id: "first-recording",
-    store: ".rewind",
-    model,
-    codec
-  },
-  harness
-);
+const recorded = await rewind.recordRun({ id: "first-recording" }, harness);
 
-const replayed = await AgentRewind.replayRun(recorded.path, { codec }, harness);
+const replayed = await rewind.replayRun(recorded.path, harness);
 ```
 
 ## Add Tools One At A Time
@@ -100,7 +92,7 @@ Start with one model call. Then move prompt-affecting external work behind
 tools:
 
 ```ts
-import { defineHarness, defineTools } from "@agentrewind/sdk";
+import { createOpenAIRewind, defineAgent, defineHarness, defineTools } from "@agentrewind/sdk";
 
 const tools = defineTools({
   lookupCustomer: async (args: { customerId: string }) => {
@@ -109,6 +101,7 @@ const tools = defineTools({
 });
 
 const chatModel = process.env.OPENAI_MODEL ?? "gpt-5.5";
+const rewind = createOpenAIRewind({ store: ".rewind", tools });
 
 const harness = defineHarness(tools, async (ctx) => {
   const customer = await ctx.tools.lookupCustomer({ customerId: "cus_123" });
@@ -120,23 +113,16 @@ const harness = defineHarness(tools, async (ctx) => {
     { site: "summarize-customer" }
   );
 });
+const agent = defineAgent({ tools, harness });
 
-const recorded = await AgentRewind.recordRun(
-  {
-    id: "ticket-triage",
-    store: ".rewind",
-    model,
-    codec,
-    tools
-  },
-  harness
-);
+const recorded = await rewind.recordRun({ id: "ticket-triage" }, agent);
 ```
 
 During replay, `lookupCustomer` is not called. AgentRewind returns the recorded
-tool result. `defineTools()` and `defineHarness()` are no-ops at runtime; they
-preserve concrete tool names, argument types, result types, and the harness
-return type so you do not have to write `Harness<Result, typeof tools>` by hand.
+tool result. `defineTools()` and `defineHarness()` preserve concrete tool names,
+argument types, result types, and the harness return type so you do not have to
+write `Harness<Result, typeof tools>` by hand. `defineAgent({ tools, harness })`
+also carries those tools at runtime.
 
 ## Fail Fast On Provider Setup
 
@@ -252,10 +238,11 @@ need the codec to fingerprint current requests and prepare live fork requests.
   classes, Buffers, BigInts, functions, NaN, and Infinity to JSON values, or use
   `toolSerializers` for tool-specific runtime types.
 - Defining tools for TypeScript but forgetting to pass them to recording. Use
-  the same `tools` object in `defineHarness(tools, harness)` and
-  `AgentRewind.recordRun({ ..., tools }, harness)`.
-- Using `Date.now()`, `Math.random()`, or `crypto.randomUUID()` in prompts. Use
-  `ctx.clock()`, `ctx.random()`, and `ctx.uuid()`.
+  `defineAgent({ tools, harness })` or pass the same `tools` object in both
+  places.
+- Using `Date.now()`, `Math.random()`, `crypto.randomUUID()`, or `process.env`
+  directly in prompts. Use `ctx.clock()`, `ctx.random()`, `ctx.uuid()`, and
+  `ctx.env(key)`.
 - Omitting `site` names on important model calls. Stable names make drift much
   easier to diagnose.
 - Expecting strict replay to call live clients. Strict replay should make zero

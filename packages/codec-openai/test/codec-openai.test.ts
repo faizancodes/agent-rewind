@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import OpenAI from "openai";
-import { AgentRewind } from "@agentrewind/core";
+import { AgentRewind, type ProviderCodec } from "@agentrewind/core";
 import { openaiChatCodec } from "../src/index.js";
 
 describe("openaiChatCodec", () => {
@@ -96,7 +96,7 @@ describe("openaiChatCodec", () => {
       id: "openai-compatible",
       store,
       model,
-      codec
+      codec: codec as ProviderCodec
     });
     await record.run(async (ctx) => {
       const response = (await ctx.model.create(request, { site: "chat" })) as OpenAIChatFixture;
@@ -109,7 +109,7 @@ describe("openaiChatCodec", () => {
     });
     await record.close();
 
-    const replay = await AgentRewind.replay(join(store, "openai-compatible"), { codec });
+    const replay = await AgentRewind.replay(join(store, "openai-compatible"), { codec: codec as ProviderCodec });
     await replay.run(async (ctx) => {
       const response = (await ctx.model.create(request, { site: "chat" })) as OpenAIChatFixture;
       expect(response.choices?.[0]?.message?.content).toBe("Recorded");
@@ -202,12 +202,12 @@ describe("openaiChatCodec", () => {
       id: "openai-fork",
       store,
       model: recordModel,
-      codec
+      codec: codec as ProviderCodec
     });
     expect(await record.run(harness)).toBe("deny");
     await record.close();
 
-    const replay = await AgentRewind.replay(join(store, "openai-fork"), { codec });
+    const replay = await AgentRewind.replay(join(store, "openai-fork"), { codec: codec as ProviderCodec });
     expect(await replay.run(harness)).toBe("deny");
     const modelStep = replay.events().find((event) => event.kind === "model_call")?.step;
     expect(modelStep).toBeDefined();
@@ -255,7 +255,7 @@ describe("openaiChatCodec", () => {
       counts: { modelCalls: 1 }
     });
 
-    const childReplay = await AgentRewind.replay(join(store, fork.sessionId), { codec });
+    const childReplay = await AgentRewind.replay(join(store, fork.sessionId), { codec: codec as ProviderCodec });
     await childReplay.run(async (ctx) => {
       const response = await ctx.model.create<OpenAIChatFixture>(liveRequests[0], { site: "refund-decision" });
       expect(response.choices?.[0]?.message?.content).toBe("approve");
@@ -284,12 +284,12 @@ describe("openaiChatCodec", () => {
       id: "live-openai-fork",
       store,
       model,
-      codec
+      codec: codec as ProviderCodec
     });
     const recorded = await record.run(harness);
     await record.close();
 
-    const replay = await AgentRewind.replay(join(store, "live-openai-fork"), { codec });
+    const replay = await AgentRewind.replay(join(store, "live-openai-fork"), { codec: codec as ProviderCodec });
     await expect(replay.run(harness)).resolves.toBe(recorded);
     const modelStep = replay.events().find((event) => event.kind === "model_call")?.step;
     expect(modelStep).toBeDefined();

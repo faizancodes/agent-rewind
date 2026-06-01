@@ -33,6 +33,7 @@ export type ToolHandler<Args = unknown, Result = unknown> = (args: Args) => Resu
 export type ToolHandlers = Record<string, ToolHandler<never, unknown>>;
 export type UntypedToolHandlers = Record<string, ToolHandler<unknown, unknown>>;
 type CallableToolHandler = (args: unknown) => unknown | Promise<unknown> | AsyncIterable<unknown>;
+type RuntimeEntropySource = Exclude<EntropyEvent["source"], "env">;
 export type InterceptPurpose = "create" | "stream";
 
 export type WrappedToolHandler<THandler> = THandler extends (args: infer Args) => infer Result
@@ -51,17 +52,22 @@ export function defineTools<TTools extends ToolHandlers>(tools: TTools): TTools 
 }
 
 /** Model facade exposed inside an AgentRewind harness. */
-export interface WrappedModel {
+export interface WrappedModel<TRequest = unknown, TResponse = unknown, TStreamChunk = unknown> {
   /** Record or replay a non-streaming provider call. Pass `site` for stable drift diagnostics. */
-  create<T = unknown>(req: unknown, opts?: { site?: string }): Promise<T>;
+  create<T = TResponse>(req: TRequest, opts?: { site?: string }): Promise<T>;
   /** Record or replay a streaming provider call. Pass `site` for stable drift diagnostics. */
-  stream<T = unknown>(req: unknown, opts?: { site?: string }): AsyncIterable<T>;
+  stream<T = TStreamChunk>(req: TRequest, opts?: { site?: string }): AsyncIterable<T>;
 }
 
 /** Runtime context passed to user harnesses in record, replay, and fork modes. */
-export interface AgentContext<TTools extends ToolHandlers = UntypedToolHandlers> {
+export interface AgentContext<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> {
   /** Wrapped model client. Use this instead of calling the SDK client directly. */
-  model: WrappedModel;
+  model: WrappedModel<TRequest, TResponse, TStreamChunk>;
   /** Wrapped tool handlers. Use these for external I/O that should replay deterministically. */
   tools: WrappedTools<TTools>;
   /** Replayable wall-clock milliseconds. */
@@ -70,27 +76,81 @@ export interface AgentContext<TTools extends ToolHandlers = UntypedToolHandlers>
   random(): number;
   /** Replayable UUID string. */
   uuid(): string;
-  /** Read an environment variable and record an audit note during recording. */
+  /** Read an environment variable through the replayable boundary log. */
   env(key: string): string | undefined;
   /** Add a note event to the session log. */
   note(text: string): void;
 }
 
 /** User code executed by AgentRewind. */
-export type Harness<T = unknown, TTools extends ToolHandlers = UntypedToolHandlers> = (ctx: AgentContext<TTools>) => Promise<T>;
+export type Harness<
+  T = unknown,
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> = (ctx: AgentContext<TTools, TRequest, TResponse, TStreamChunk>) => Promise<T>;
 
 /** Preserve harness return type and, when supplied, the concrete tool types available on `ctx.tools`. */
-export function defineHarness<T>(harness: Harness<T>): Harness<T>;
-export function defineHarness<TTools extends ToolHandlers, T>(tools: TTools, harness: Harness<T, TTools>): Harness<T, TTools>;
-export function defineHarness<TTools extends ToolHandlers, T>(
-  toolsOrHarness: TTools | Harness<T>,
-  harness?: Harness<T, TTools>
-): Harness<T, TTools> | Harness<T> {
-  return (harness ?? toolsOrHarness) as Harness<T, TTools> | Harness<T>;
+export function defineHarness<T, TRequest = unknown, TResponse = unknown, TStreamChunk = unknown>(
+  harness: Harness<T, UntypedToolHandlers, TRequest, TResponse, TStreamChunk>
+): Harness<T, UntypedToolHandlers, TRequest, TResponse, TStreamChunk>;
+export function defineHarness<TTools extends ToolHandlers, T, TRequest = unknown, TResponse = unknown, TStreamChunk = unknown>(
+  tools: TTools,
+  harness: Harness<T, TTools, TRequest, TResponse, TStreamChunk>
+): Harness<T, TTools, TRequest, TResponse, TStreamChunk>;
+export function defineHarness<TTools extends ToolHandlers, T, TRequest = unknown, TResponse = unknown, TStreamChunk = unknown>(
+  toolsOrHarness: TTools | Harness<T, UntypedToolHandlers, TRequest, TResponse, TStreamChunk>,
+  harness?: Harness<T, TTools, TRequest, TResponse, TStreamChunk>
+): Harness<T, TTools, TRequest, TResponse, TStreamChunk> | Harness<T, UntypedToolHandlers, TRequest, TResponse, TStreamChunk> {
+  return (harness ?? toolsOrHarness) as
+    | Harness<T, TTools, TRequest, TResponse, TStreamChunk>
+    | Harness<T, UntypedToolHandlers, TRequest, TResponse, TStreamChunk>;
+}
+
+/** Agent definition that carries tool handlers and harness together at runtime. */
+export interface AgentDefinition<
+  T = unknown,
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> {
+  readonly tools?: TTools;
+  readonly harness: Harness<T, TTools, TRequest, TResponse, TStreamChunk>;
+}
+
+/** Preserve harness and tool types while avoiding duplicate tools wiring in record/replay calls. */
+export function defineAgent<TTools extends ToolHandlers, T, TRequest = unknown, TResponse = unknown, TStreamChunk = unknown>(definition: {
+  tools: TTools;
+  harness: Harness<T, TTools, TRequest, TResponse, TStreamChunk>;
+}): AgentDefinition<T, TTools, TRequest, TResponse, TStreamChunk>;
+export function defineAgent<T, TRequest = unknown, TResponse = unknown, TStreamChunk = unknown>(definition: {
+  harness: Harness<T, UntypedToolHandlers, TRequest, TResponse, TStreamChunk>;
+}): AgentDefinition<T, UntypedToolHandlers, TRequest, TResponse, TStreamChunk>;
+export function defineAgent<TTools extends ToolHandlers, T, TRequest = unknown, TResponse = unknown, TStreamChunk = unknown>(definition: {
+  tools?: TTools;
+  harness: Harness<T, TTools, TRequest, TResponse, TStreamChunk>;
+}): AgentDefinition<T, TTools, TRequest, TResponse, TStreamChunk> {
+  return Object.freeze({ ...definition });
+}
+
+export function isAgentDefinition(value: unknown): value is AgentDefinition {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "harness" in value &&
+    typeof (value as { harness?: unknown }).harness === "function"
+  );
 }
 
 /** Options for creating a recording session. */
-export interface RecordOptions<TTools extends ToolHandlers = UntypedToolHandlers> {
+export interface RecordOptions<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> {
   /** Session id. Defaults to a generated UUID. */
   id?: string;
   /** Directory that will contain `<store>/<session-id>/`. */
@@ -100,7 +160,7 @@ export interface RecordOptions<TTools extends ToolHandlers = UntypedToolHandlers
   /** Tool handlers available through `ctx.tools`. */
   tools?: TTools;
   /** Provider codec for the model client. */
-  codec: ProviderCodec;
+  codec: ProviderCodec<TRequest, TResponse, TStreamChunk>;
   /** Redaction settings. Redaction is enabled by default. */
   redaction?: RedactionConfig;
   /** Request fingerprinting mode. Defaults to `strict`. */
@@ -118,12 +178,17 @@ export interface RecordOptions<TTools extends ToolHandlers = UntypedToolHandlers
 }
 
 /** Live recording session. Close it to flush events, blobs, metadata, and vault. */
-export interface Session<TTools extends ToolHandlers = UntypedToolHandlers> {
+export interface Session<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> {
   readonly id: string;
   /** Run a harness with wrapped model, tools, and entropy sources. */
-  run<T>(harness: Harness<T, TTools>): Promise<T>;
+  run<T>(harness: Harness<T, TTools, TRequest, TResponse, TStreamChunk>): Promise<T>;
   /** Low-level model wrapper for advanced integrations outside `run()`. */
-  wrapModel(client: unknown): WrappedModel;
+  wrapModel(client: unknown): WrappedModel<TRequest, TResponse, TStreamChunk>;
   /** Low-level tool wrapper for advanced integrations outside `run()`. */
   wrapTools<TWrappedTools extends ToolHandlers>(handlers: TWrappedTools): WrappedTools<TWrappedTools>;
   /** Append a note event to the session. */
@@ -134,9 +199,14 @@ export interface Session<TTools extends ToolHandlers = UntypedToolHandlers> {
   pack(outPath: string): Promise<void>;
 }
 
-export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> implements Session<TTools> {
+export class RecordSession<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> implements Session<TTools, TRequest, TResponse, TStreamChunk> {
   readonly id: string;
-  readonly codec: ProviderCodec;
+  readonly codec: ProviderCodec<TRequest, TResponse, TStreamChunk>;
   readonly redactor: Redactor;
   readonly fingerprintMode: FingerprintMode;
   private readonly runtime: EntropyRuntime;
@@ -144,10 +214,11 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
   private readonly eventsBuffer: RewindEvent[] = [];
   private readonly callOrdinals = new Map<string, number>();
   private closed = false;
+  private closePromise: Promise<void> | undefined;
   private ok = true;
   private meta: SessionMeta;
 
-  constructor(private readonly opts: RecordOptions<TTools>) {
+  constructor(private readonly opts: RecordOptions<TTools, TRequest, TResponse, TStreamChunk>) {
     this.id = opts.id ?? (opts.runtime?.uuid ?? defaultEntropyRuntime.uuid)();
     this.codec = opts.codec;
     this.redactor = new Redactor(opts.redaction);
@@ -168,7 +239,7 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
     this.append(this.sessionStartEvent());
   }
 
-  async run<T>(harness: Harness<T, TTools>): Promise<T> {
+  async run<T>(harness: Harness<T, TTools, TRequest, TResponse, TStreamChunk>): Promise<T> {
     try {
       if (!this.opts.purityLint) {
         return await this.lanes.run(() => harness(this.context()));
@@ -188,10 +259,10 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
     }
   }
 
-  wrapModel(client: unknown): WrappedModel {
+  wrapModel(client: unknown): WrappedModel<TRequest, TResponse, TStreamChunk> {
     return {
-      create: <T = unknown>(req: unknown, opts?: { site?: string }) => this.recordModelCreate(client, req, opts?.site) as Promise<T>,
-      stream: <T = unknown>(req: unknown, opts?: { site?: string }) => this.recordModelStream(client, req, opts?.site) as AsyncIterable<T>
+      create: <T = TResponse>(req: TRequest, opts?: { site?: string }) => this.recordModelCreate(client, req, opts?.site) as Promise<T>,
+      stream: <T = TStreamChunk>(req: TRequest, opts?: { site?: string }) => this.recordModelStream(client, req, opts?.site) as AsyncIterable<T>
     };
   }
 
@@ -234,16 +305,34 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
     if (this.closed) {
       return;
     }
-    this.closed = true;
-    this.append(this.sessionEndEvent());
-    this.meta = {
-      ...this.meta,
-      redactionSummary: {
-        total: this.redactor.summary.total,
-        byPattern: { ...this.redactor.summary.byPattern }
+    if (this.closePromise) {
+      return this.closePromise;
+    }
+    const endEvent = this.sessionEndEvent();
+    this.append(endEvent);
+    const previousMeta = this.meta;
+    this.closePromise = (async () => {
+      try {
+        this.meta = {
+          ...this.meta,
+          redactionSummary: {
+            total: this.redactor.summary.total,
+            byPattern: { ...this.redactor.summary.byPattern }
+          }
+        };
+        this.meta = await writeSession(this.opts.store, this.meta, this.eventsBuffer, this.redactor.vault);
+        this.closed = true;
+      } catch (error) {
+        if (this.eventsBuffer.at(-1) === endEvent) {
+          this.eventsBuffer.pop();
+        }
+        this.meta = previousMeta;
+        throw error;
+      } finally {
+        this.closePromise = undefined;
       }
-    };
-    this.meta = await writeSession(this.opts.store, this.meta, this.eventsBuffer, this.redactor.vault);
+    })();
+    return this.closePromise;
   }
 
   async pack(outPath: string): Promise<void> {
@@ -387,17 +476,17 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
   }
 
   async recordLiveModel(
-    rawRequest: unknown,
+    rawRequest: TRequest,
     liveClient: unknown,
     site: string | undefined,
     provenance: EventProvenance = "live",
-    requestOverride?: unknown
+    requestOverride?: TRequest
   ): Promise<unknown> {
     return this.recordModelCreate(liveClient, rawRequest, site, provenance, requestOverride);
   }
 
   recordLiveModelStream(
-    rawRequest: unknown,
+    rawRequest: TRequest,
     liveClient: unknown,
     site: string | undefined,
     provenance: EventProvenance = "live"
@@ -408,18 +497,23 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
   recordLiveEntropy(source: "clock", provenance?: EventProvenance): number;
   recordLiveEntropy(source: "random", provenance?: EventProvenance): number;
   recordLiveEntropy(source: "uuid", provenance?: EventProvenance): string;
-  recordLiveEntropy(source: EntropyEvent["source"], provenance?: EventProvenance): number | string;
-  recordLiveEntropy(source: EntropyEvent["source"], provenance: EventProvenance = "live"): number | string {
+  recordLiveEntropy(source: RuntimeEntropySource, provenance?: EventProvenance): number | string;
+  recordLiveEntropy(source: RuntimeEntropySource, provenance: EventProvenance = "live"): number | string {
     const value =
       source === "clock"
         ? this.runtime.now()
         : source === "random"
           ? this.runtime.random()
           : this.runtime.uuid();
-    return this.recordEntropy(source, value, provenance);
+    return this.recordEntropy(source, value, provenance) as number | string;
   }
 
-  private context(): AgentContext<TTools> {
+  recordEnv(key: string, value: string | undefined, provenance: EventProvenance = "live"): string | undefined {
+    const recorded = this.recordEntropy("env", value ?? null, provenance, key);
+    return recorded === null ? undefined : String(recorded);
+  }
+
+  private context(): AgentContext<TTools, TRequest, TResponse, TStreamChunk> {
     return {
       model: this.wrapModel(this.opts.model),
       tools: this.wrapTools(this.opts.tools ?? {}),
@@ -428,19 +522,18 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
       uuid: () => this.recordLiveEntropy("uuid"),
       env: (key) => {
         const value = process.env[key];
-        this.note(`env:${key}=${value ?? ""}`);
-        return value;
+        return this.recordEnv(key, value);
       },
       note: (text) => this.note(text)
-    } as AgentContext<TTools>;
+    } as AgentContext<TTools, TRequest, TResponse, TStreamChunk>;
   }
 
   private recordModelCreate(
     client: unknown,
-    rawRequest: unknown,
+    rawRequest: TRequest,
     site: string | undefined,
     provenance: EventProvenance = "live",
-    requestOverride?: unknown
+    requestOverride?: TRequest
   ): Promise<unknown> {
     const initiated = this.beginBoundary("model_call", site);
     const normalizedRequest = this.codec.normalizeRequest(rawRequest);
@@ -450,7 +543,7 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
     return this.lanes.withLane(initiated.lane, async () => {
       try {
         const liveRaw = await invokeClient(client, selectInterceptPoint(this.codec, "create"), requestOverride ?? rawRequest, this.codec);
-        const normalizedResponse = this.codec.normalizeResponse(liveRaw);
+        const normalizedResponse = this.codec.normalizeResponse(liveRaw as TResponse);
         assertJsonSerializable(normalizedResponse, "model.response");
         const storedResponse = this.redactor.redactDeep(normalizedResponse);
         const usage = this.codec.extractUsage(normalizedResponse) ?? normalizedResponse.usage;
@@ -488,7 +581,7 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
 
   private recordModelStream(
     client: unknown,
-    rawRequest: unknown,
+    rawRequest: TRequest,
     site: string | undefined,
     provenance: EventProvenance = "live"
   ): AsyncIterable<unknown> {
@@ -528,7 +621,7 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
           if (persisted) {
             return;
           }
-          const normalized = self.codec.normalizeStream(chunks);
+          const normalized = self.codec.normalizeStream(chunks as TStreamChunk[]);
           normalized.chunks = normalized.chunks.map((chunk, index) => ({
             ...chunk,
             offsetMs: offsets[index] ?? chunk.offsetMs
@@ -697,11 +790,18 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
   private recordEntropy(source: "clock", value: number, provenance?: EventProvenance): number;
   private recordEntropy(source: "random", value: number, provenance?: EventProvenance): number;
   private recordEntropy(source: "uuid", value: string, provenance?: EventProvenance): string;
-  private recordEntropy(source: EntropyEvent["source"], value: number | string, provenance?: EventProvenance): number | string;
-  private recordEntropy(source: EntropyEvent["source"], value: number | string, provenance: EventProvenance = "live"): number | string {
-    const initiated = this.beginBoundary("entropy", source);
+  private recordEntropy(source: "env", value: string | null, provenance: EventProvenance, key: string): string | null;
+  private recordEntropy(source: EntropyEvent["source"], value: number | string | null, provenance?: EventProvenance, key?: string): number | string | null;
+  private recordEntropy(
+    source: EntropyEvent["source"],
+    value: number | string | null,
+    provenance: EventProvenance = "live",
+    key?: string
+  ): number | string | null {
+    const explicit = source === "env" && key ? `env:${key}` : source;
+    const initiated = this.beginBoundary("entropy", explicit);
     try {
-      this.append({ ...initiated, kind: "entropy", source, value, provenance });
+      this.append({ ...initiated, kind: "entropy", source, ...(key ? { key } : {}), value, provenance });
       return value;
     } finally {
       this.lanes.endBoundaryLane(initiated.lane);
@@ -753,7 +853,12 @@ export class RecordSession<TTools extends ToolHandlers = UntypedToolHandlers> im
   }
 }
 
-export function createRecordSession<TTools extends ToolHandlers = UntypedToolHandlers>(opts: RecordOptions<TTools>): RecordSession<TTools> {
+export function createRecordSession<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+>(opts: RecordOptions<TTools, TRequest, TResponse, TStreamChunk>): RecordSession<TTools, TRequest, TResponse, TStreamChunk> {
   assertRecordOptions(opts);
   return new RecordSession(opts);
 }
@@ -819,7 +924,12 @@ const requiredCodecFunctionFields = [
 
 const requiredCodecFields = ["name", "interceptPoints", ...requiredCodecFunctionFields] as const;
 
-function assertRecordOptions<TTools extends ToolHandlers>(opts: RecordOptions<TTools>): void {
+function assertRecordOptions<
+  TTools extends ToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+>(opts: RecordOptions<TTools, TRequest, TResponse, TStreamChunk>): void {
   if (!isObjectRecord(opts)) {
     throw new ConfigurationError("AgentRewind.record() requires a record options object", {
       missing: "recordOptions",

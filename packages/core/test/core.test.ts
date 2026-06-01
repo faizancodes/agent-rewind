@@ -1,7 +1,7 @@
 import { gunzip, gzip } from "node:zlib";
 import { promisify } from "node:util";
 import { AssertionError } from "node:assert";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
@@ -16,8 +16,12 @@ import {
   Redactor,
   SessionStoreError,
   SerializationError,
+  Vault,
+  VaultError,
+  assertCodecConformance,
   assertProviderClient,
   assertProviderCodec,
+  defineAgent,
   defineHarness,
   defineTools,
   diffMessages,
@@ -29,11 +33,13 @@ import {
   readSession,
   readSessionSummary,
   resolveSessionPath,
+  saveVault,
   setVaultCryptoForTests,
   unpackSession,
   usageAdd,
   usageByStep,
   usageTotal,
+  writeSession,
   type AgentContext,
   type ForkOptions,
   type ForkOverrides,
@@ -44,6 +50,7 @@ import {
   type ProviderCodec,
   type RecordOptions,
   type Replay,
+  type RewindEvent,
   type ToolValueSerializer,
   type Usage
 } from "@agentrewind/core";
@@ -254,6 +261,127 @@ describe("AgentRewind core", () => {
     await writeFile(pack, await gzipAsync(buildTestTar([{ name: "../escaped.txt", data: "owned" }])));
     await expect(unpackSession(pack, join(store, "out"))).rejects.toBeInstanceOf(SessionStoreError);
     await expect(readFile(join(store, "escaped.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("rejects packed sessions with unsupported tar entry types", async () => {
+    const store = await tempStore();
+    const pack = join(store, "symlink-entry.rewind");
+    await writeFile(pack, await gzipAsync(buildTestTar([{ name: "linked-secret", data: "", type: "2" }])));
+
+    await expect(unpackSession(pack, join(store, "out"))).rejects.toBeInstanceOf(SessionStoreError);
+    await expect(unpackSession(pack, join(store, "out"))).rejects.toThrow("unsupported tar entry type");
+    await expect(readFile(join(store, "out", "linked-secret"), "utf8")).rejects.toThrow();
+  });
+
+  it("rejects packed sessions that contain symlinks", async () => {
+    const store = await tempStore();
+    const session = AgentRewind.record({
+      id: "symlink-pack",
+      store,
+      model: fakeModel([{ content: "ok" }]),
+      codec
+    });
+    await session.run(async (ctx) => {
+      await ctx.model.create(req("ok"), { site: "model" });
+    });
+    await session.close();
+
+    const outside = join(store, "outside-secret.txt");
+    await writeFile(outside, "do-not-pack", "utf8");
+    await symlink(outside, join(store, "symlink-pack", "linked-secret"));
+
+    const packed = join(store, "symlink-pack.rewind");
+    await expect(packSession(join(store, "symlink-pack"), packed)).rejects.toBeInstanceOf(SessionStoreError);
+    await expect(packSession(join(store, "symlink-pack"), packed)).rejects.toThrow("symbolic link");
+    await expect(readFile(packed, "utf8")).rejects.toThrow();
+  });
+
+  it("does not overwrite an existing session id", async () => {
+    const store = await tempStore();
+    const first = AgentRewind.record({
+      id: "duplicate",
+      store,
+      model: fakeModel([{ content: "first" }]),
+      codec
+    });
+    await first.run(async (ctx) => {
+      await ctx.model.create(req("first"), { site: "model" });
+    });
+    await first.close();
+
+    const second = AgentRewind.record({
+      id: "duplicate",
+      store,
+      model: fakeModel([{ content: "second" }]),
+      codec
+    });
+    await second.run(async (ctx) => {
+      await ctx.model.create(req("second"), { site: "model" });
+    });
+    await expect(second.close()).rejects.toBeInstanceOf(SessionStoreError);
+    await expect(second.close()).rejects.toThrow("already exists");
+
+    const stored = await readSession(join(store, "duplicate"));
+    const model = stored.events.find((event) => event.kind === "model_call");
+    expect(model?.response?.content).toBe("first");
+  });
+
+  it("cleans up a new session directory when persistence fails", async () => {
+    const store = await tempStore();
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+
+    await expect(
+      writeSession(
+        store,
+        {
+          id: "partial-write",
+          createdAt: 1,
+          agentRewindVersion: "0.1.0",
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+          provider: "synthetic",
+          fingerprintMode: "strict",
+          redaction: { enabled: true, patterns: [] },
+          eventsHash: ""
+        },
+        [
+          {
+            seq: 0,
+            step: 0,
+            ts: 1,
+            lane: "0",
+            callSite: "fixture",
+            kind: "note",
+            schemaVersion: CURRENT_SCHEMA_VERSION,
+            text: circular
+          }
+        ] as unknown as RewindEvent[],
+        new Vault()
+      )
+    ).rejects.toThrow("circular");
+
+    await expect(readdir(join(store, "partial-write"))).rejects.toThrow();
+  });
+
+  it("pack waits for an in-flight close before reading session files", async () => {
+    const store = await tempStore();
+    const session = AgentRewind.record({
+      id: "close-pack-race",
+      store,
+      model: fakeModel([{ content: "ok" }]),
+      codec
+    });
+    await session.run(async (ctx) => {
+      await ctx.model.create(req("ok"), { site: "model" });
+    });
+
+    const packed = join(store, "close-pack-race.rewind");
+    const closing = session.close();
+    await expect(session.pack(packed)).resolves.toBeUndefined();
+    await closing;
+
+    const archive = await gunzipAsync(await readFile(packed));
+    expect(archive.toString("utf8")).toContain("events.jsonl");
   });
 
   it("validates blob ids and blob content hashes during hydration", async () => {
@@ -485,6 +613,107 @@ describe("AgentRewind core", () => {
     });
   });
 
+  it("defineAgent carries tools into recordRun and replayRun", async () => {
+    const store = await tempStore();
+    const tools = defineTools({
+      lookupCustomer: async (args: { customerId: string }) => ({ customerId: args.customerId, tier: "enterprise" })
+    });
+    const agent = defineAgent({
+      tools,
+      harness: async (ctx) => {
+        const customer = await ctx.tools.lookupCustomer({ customerId: "cus_123" });
+        const response = await ctx.model.create<NormalizedResponse>(req(customer.tier), { site: "agent-model" });
+        return response.content;
+      }
+    });
+
+    const recorded = await AgentRewind.recordRun(
+      {
+        id: "defined-agent",
+        store,
+        model: fakeModel([{ content: "ok", usage: usage(1, 1) }]),
+        codec
+      },
+      agent
+    );
+
+    await expect(AgentRewind.replayRun(recorded.path, { codec }, agent)).resolves.toBe("ok");
+    const stored = await readSession(recorded.path);
+    expect(stored.events).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "tool_call", name: "lookupCustomer" })]));
+  });
+
+  it("withProvider binds model, codec, store, and tools once", async () => {
+    const store = await tempStore();
+    const tools = defineTools({
+      lookupCustomer: async (args: { customerId: string }) => ({ customerId: args.customerId, tier: "enterprise" })
+    });
+    const rewind = AgentRewind.withProvider({
+      store,
+      model: fakeModel([{ content: "bound", usage: usage(2, 1) }]),
+      codec,
+      tools
+    });
+    const agent = defineAgent({
+      tools,
+      harness: async (ctx) => {
+        const customer = await ctx.tools.lookupCustomer({ customerId: "cus_456" });
+        return (await ctx.model.create<NormalizedResponse>(req(customer.tier), { site: "bound-model" })).content;
+      }
+    });
+
+    const recorded = await rewind.recordRun({ id: "bound-provider" }, agent);
+    expect(recorded.path).toBe(join(store, "bound-provider"));
+    await expect(rewind.replayRun(recorded.path, agent)).resolves.toBe("bound");
+  });
+
+  it("ctx.env records and replays environment values instead of reading live process.env during replay", async () => {
+    const store = await tempStore();
+    const previous = process.env.AGENTREWIND_TEST_ENV;
+    try {
+      process.env.AGENTREWIND_TEST_ENV = "recorded-env";
+      const recorded = await AgentRewind.recordRun(
+        {
+          id: "env-replay",
+          store,
+          model: fakeModel([{ content: "recorded-env", usage: usage(1, 1) }]),
+          codec
+        },
+        async (ctx) => {
+          const value = ctx.env("AGENTREWIND_TEST_ENV");
+          await ctx.model.create(req(value ?? "missing"), { site: "env-model" });
+          return value;
+        }
+      );
+      process.env.AGENTREWIND_TEST_ENV = "changed-env";
+
+      await expect(
+        AgentRewind.replayRun(recorded.path, { codec }, async (ctx) => {
+          const value = ctx.env("AGENTREWIND_TEST_ENV");
+          await ctx.model.create(req(value ?? "missing"), { site: "env-model" });
+          return value;
+        })
+      ).resolves.toBe("recorded-env");
+
+      const stored = await readSession(recorded.path);
+      expect(stored.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "entropy",
+            source: "env",
+            key: "AGENTREWIND_TEST_ENV",
+            value: "recorded-env"
+          })
+        ])
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.AGENTREWIND_TEST_ENV;
+      } else {
+        process.env.AGENTREWIND_TEST_ENV = previous;
+      }
+    }
+  });
+
   it("record mode explains missing tool handlers instead of throwing a plain TypeError", async () => {
     const store = await tempStore();
     const session = AgentRewind.record({
@@ -705,7 +934,7 @@ describe("AgentRewind core", () => {
     expect(explainRewindError(thrown)).toContain("client.chat.completions.create(request)");
   });
 
-  it("record setup validates required options and codec shape with ConfigurationError", () => {
+  it("record setup validates required options and codec shape with ConfigurationError", async () => {
     const missingOptions = (() => {
       try {
         AgentRewind.record(undefined as unknown as RecordOptions);
@@ -756,6 +985,15 @@ describe("AgentRewind core", () => {
     })();
     expect(invalidCodec).toBeInstanceOf(ConfigurationError);
     expect(explainRewindError(invalidCodec)).toContain("Missing codec fields:");
+
+    await expect(
+      assertCodecConformance(codec, {
+        name: "basic",
+        request: req("hello"),
+        response: { content: "ok", usage: usage(1, 1) },
+        streamChunks: [{ content: "chunk" }]
+      })
+    ).resolves.toBeUndefined();
 
     const missingAssertCodec = (() => {
       try {
@@ -1890,6 +2128,55 @@ describe("AgentRewind core", () => {
     await childReplay.run(harness);
   });
 
+  it("fork records live tail env reads while preserving recorded prefix env reads", async () => {
+    const store = await tempStore();
+    const previous = process.env.AGENTREWIND_FORK_ENV;
+    try {
+      process.env.AGENTREWIND_FORK_ENV = "recorded";
+      const harness = async (ctx: AgentContext) => {
+        const value = ctx.env("AGENTREWIND_FORK_ENV");
+        return ctx.model.create(req(value ?? "missing"), { site: "tail" });
+      };
+      const record = AgentRewind.record({
+        id: "fork-env",
+        store,
+        model: fakeModel([{ content: "old", usage: usage(1, 1) }]),
+        codec
+      });
+      await record.run(harness);
+      await record.close();
+
+      const replay = await AgentRewind.replay(join(store, "fork-env"), { codec });
+      await replay.run(harness);
+      const envStep = replay.events().find((event) => event.kind === "entropy" && event.source === "env")?.step ?? -1;
+
+      process.env.AGENTREWIND_FORK_ENV = "forked";
+      const result = await replay.fork({
+        atStep: envStep,
+        model: fakeModel([{ content: "new", usage: usage(2, 2) }])
+      });
+
+      const child = await readSession(join(store, result.sessionId));
+      expect(child.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "entropy",
+            source: "env",
+            key: "AGENTREWIND_FORK_ENV",
+            value: "forked",
+            provenance: "live"
+          })
+        ])
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.AGENTREWIND_FORK_ENV;
+      } else {
+        process.env.AGENTREWIND_FORK_ENV = previous;
+      }
+    }
+  });
+
   it("fork child sessions inherit stored redaction patterns for live tail events", async () => {
     const store = await tempStore();
     const secret = "secret-999";
@@ -2035,10 +2322,11 @@ describe("AgentRewind core", () => {
     await helper.assertReplay(async (ctx) => ctx.model.create(req("same"), { site: "model" }));
     await helper.assertSemanticTrajectory(async (ctx) => ctx.model.create(req("same"), { site: "model" }));
     await assertReplay("helper", { store, codec }, async (ctx) => ctx.model.create(req("same"), { site: "model" }));
-    await expect(assertReplay("latest", { store, codec }, async (ctx) => ctx.model.create(req("different"), { site: "model" })))
-      .rejects.toThrow("What to check:");
-    await expect(assertReplay("latest", { store, codec }, async (ctx) => ctx.model.create(req("different"), { site: "model" })))
-      .rejects.toBeInstanceOf(AssertionError);
+    const drift = await assertReplay("latest", { store, codec }, async (ctx) => ctx.model.create(req("different"), { site: "model" })).catch(
+      (error) => error
+    );
+    expect(drift).toBeInstanceOf(AssertionError);
+    expect((drift as Error).message).toContain("What to check:");
     let liveCalls = 0;
     await expect(
       assertReplay(
@@ -2153,6 +2441,51 @@ describe("AgentRewind core", () => {
     }
   });
 
+  it("readSession fails closed when encrypted vault material is missing or malformed", async () => {
+    const store = await tempStore();
+    const missingKey = AgentRewind.record({
+      id: "vault-missing-key",
+      store,
+      model: fakeModel([{ content: "secret-111" }]),
+      codec,
+      redaction: { enabled: true, patterns: [/secret-\d+/g] }
+    });
+    await missingKey.run(async (ctx) => {
+      await ctx.model.create(req("secret-111"), { site: "model" });
+    });
+    await missingKey.close();
+    await rm(join(store, "vault-missing-key", "vault.enc.key"));
+    await expect(readSession(join(store, "vault-missing-key"))).rejects.toBeInstanceOf(VaultError);
+    await expect(readSession(join(store, "vault-missing-key"))).rejects.toThrow("Missing local vault key");
+
+    const malformedVault = AgentRewind.record({
+      id: "vault-malformed",
+      store,
+      model: fakeModel([{ content: "secret-222" }]),
+      codec,
+      redaction: { enabled: true, patterns: [/secret-\d+/g] }
+    });
+    await malformedVault.run(async (ctx) => {
+      await ctx.model.create(req("secret-222"), { site: "model" });
+    });
+    await malformedVault.close();
+    await writeFile(join(store, "vault-malformed", "vault.enc"), "not-a-vault", "utf8");
+    await expect(readSession(join(store, "vault-malformed"))).rejects.toBeInstanceOf(VaultError);
+    await expect(readSession(join(store, "vault-malformed"))).rejects.toThrow("Unsupported vault format");
+  });
+
+  it("saveVault refuses to replace invalid local vault keys", async () => {
+    const store = await tempStore();
+    const vaultPath = join(store, "vault.enc");
+    await writeFile(`${vaultPath}.key`, "short", "utf8");
+    const vault = new Vault();
+    vault.add("arw:redacted:test", "secret-value");
+
+    await expect(saveVault(vaultPath, vault)).rejects.toBeInstanceOf(VaultError);
+    await expect(readFile(`${vaultPath}.key`, "utf8")).resolves.toBe("short");
+    await expect(readFile(vaultPath)).rejects.toThrow();
+  });
+
   it("purity lint flags an un-wrapped fs.writeFile during recording with the call site", async () => {
     const store = await tempStore();
     const outPath = join(store, "outside.txt");
@@ -2251,7 +2584,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function buildTestTar(entries: { name: string; data: string }[]): Buffer {
+function buildTestTar(entries: { name: string; data: string; type?: string }[]): Buffer {
   const chunks: Buffer[] = [];
   for (const entry of entries) {
     const body = Buffer.from(entry.data, "utf8");
@@ -2263,7 +2596,7 @@ function buildTestTar(entries: { name: string; data: string }[]): Buffer {
     header.write(`${body.length.toString(8).padStart(11, "0")}\0`, 124, 12, "ascii");
     header.write("00000000000\0", 136, 12, "ascii");
     header.fill(0x20, 148, 156);
-    header.write("0", 156, 1, "ascii");
+    header.write(entry.type ?? "0", 156, 1, "ascii");
     let checksum = 0;
     for (const byte of header) {
       checksum += byte;

@@ -6,6 +6,8 @@ packages/*/.tmp-quickstart-*/
 .npm-pack/
 *.tgz
 *.log
+*.swp
+*.swo
 .env
 .env.*
 !.env.example

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import OpenAI from "openai";
-import { AgentRewind } from "@agentrewind/core";
+import { AgentRewind, type ProviderCodec } from "@agentrewind/core";
 import { OPENROUTER_BASE_URL, openRouterChatCodec, openRouterClientOptions } from "../src/index.js";
 
 describe("openRouterChatCodec", () => {
@@ -108,7 +108,7 @@ describe("openRouterChatCodec", () => {
       id: "openrouter",
       store,
       model,
-      codec
+      codec: codec as ProviderCodec
     });
     await record.run(async (ctx) => {
       const response = (await ctx.model.create(request, { site: "chat" })) as OpenRouterChatFixture;
@@ -121,7 +121,7 @@ describe("openRouterChatCodec", () => {
     });
     await record.close();
 
-    const replay = await AgentRewind.replay(join(store, "openrouter"), { codec });
+    const replay = await AgentRewind.replay(join(store, "openrouter"), { codec: codec as ProviderCodec });
     await replay.run(async (ctx) => {
       const response = (await ctx.model.create(request, { site: "chat" })) as OpenRouterChatFixture;
       expect(response.choices?.[0]?.message?.content).toBe("Recorded");
@@ -174,12 +174,12 @@ describe("openRouterChatCodec", () => {
       id: "openrouter-fork",
       store,
       model: recordModel,
-      codec
+      codec: codec as ProviderCodec
     });
     expect(await record.run(harness)).toBe("{\"queue\":\"billing\"}");
     await record.close();
 
-    const replay = await AgentRewind.replay(join(store, "openrouter-fork"), { codec });
+    const replay = await AgentRewind.replay(join(store, "openrouter-fork"), { codec: codec as ProviderCodec });
     expect(await replay.run(harness)).toBe("{\"queue\":\"billing\"}");
     const modelStep = replay.events().find((event) => event.kind === "model_call")?.step;
     expect(modelStep).toBeDefined();
@@ -237,7 +237,7 @@ describe("openRouterChatCodec", () => {
       counts: { modelCalls: 1 }
     });
 
-    const childReplay = await AgentRewind.replay(join(store, fork.sessionId), { codec });
+    const childReplay = await AgentRewind.replay(join(store, fork.sessionId), { codec: codec as ProviderCodec });
     await childReplay.run(async (ctx) => {
       const response = await ctx.model.create<OpenRouterChatFixture>(liveRequests[0], { site: "ticket-route" });
       expect(response.choices?.[0]?.message?.content).toBe("{\"queue\":\"billing-integrity\"}");
@@ -272,12 +272,12 @@ describe("openRouterChatCodec", () => {
       id: "live-openrouter-fork",
       store,
       model,
-      codec
+      codec: codec as ProviderCodec
     });
     const recorded = await record.run(harness);
     await record.close();
 
-    const replay = await AgentRewind.replay(join(store, "live-openrouter-fork"), { codec });
+    const replay = await AgentRewind.replay(join(store, "live-openrouter-fork"), { codec: codec as ProviderCodec });
     await expect(replay.run(harness)).resolves.toBe(recorded);
     const modelStep = replay.events().find((event) => event.kind === "model_call")?.step;
     expect(modelStep).toBeDefined();

@@ -26,6 +26,7 @@ import {
   type EntropyEvent,
   type ForkOverrides,
   type ModelCallEvent,
+  type NormalizedMessage,
   type ProviderCodec,
   type RewindEvent,
   type SessionSelectorOptions,
@@ -37,7 +38,7 @@ import {
 
 const program = new Command();
 
-program.name("agentrewind").alias("arw").description("Inspect and package AgentRewind sessions").version("0.1.2");
+program.name("agentrewind").alias("arw").description("Inspect and package AgentRewind sessions").version("0.1.3");
 
 program
   .command("quickstart")
@@ -102,12 +103,20 @@ program
 
 program
   .command("inspect")
+  .alias("timeline")
   .argument("<session>")
   .option("--store <dir>", "store used when <session> is an id or latest", ".rewind")
+  .option("--kind <kind>", "comma-separated event kinds to include", parseTimelineKinds)
+  .option("--site <text>", "include only rows whose site contains this text")
+  .option("--errors", "include only rows with recorded errors")
+  .option("--live", "include only rows with live provenance")
+  .option("--from <n>", "include rows at or after this step", parseInteger)
+  .option("--to <n>", "include rows at or before this step", parseInteger)
+  .option("--full-fingerprint", "show complete request/tool fingerprints")
   .option("--json", "print machine-readable JSON")
   .option("--no-header", "omit the table header")
   .description("Print an event timeline")
-  .action(async (session: string, opts: SessionSelectorOptions & { json?: boolean; header?: boolean }) => {
+  .action(async (session: string, opts: SessionSelectorOptions & TimelineCliOptions & { json?: boolean; header?: boolean }) => {
     const rows = await readSessionTimeline(session, opts);
     if (opts.json) {
       console.log(JSON.stringify(rows, null, 2));
@@ -123,13 +132,16 @@ program
 
 program
   .command("context")
+  .alias("prompt")
   .argument("<session>")
   .option("--store <dir>", "store used when <session> is an id or latest", ".rewind")
   .option("--step <n>", "model-call step; defaults to the first model call", parseInteger)
   .option("--site <name>", "model-call site; useful when you named ctx.model calls")
+  .option("--json", "print machine-readable JSON")
   .description("Print prompt context at a model-call step")
-  .action(async (session: string, opts: SessionSelectorOptions & { step?: number; site?: string }) => {
-    console.log(JSON.stringify(await readPromptContext(session, opts), null, 2));
+  .action(async (session: string, opts: SessionSelectorOptions & { step?: number; site?: string; json?: boolean }) => {
+    const context = await readPromptContext(session, opts);
+    console.log(opts.json ? JSON.stringify(context, null, 2) : formatPromptContext(context));
   });
 
 program
@@ -165,6 +177,7 @@ program
   .option("--app-categories <list>", "comma-separated OpenRouter attribution categories")
   .option("--tool-miss <policy>", "tail tool miss policy: error or stub", "error")
   .option("--dry-run", "print the resolved fork plan without calling the provider")
+  .option("--check-provider", "with --dry-run, validate provider credentials and client shape without creating a child session")
   .option("--json", "print machine-readable JSON")
   .description("Fork a recorded run from a model call and execute the tail live")
   .action(async (session: string, opts: ForkCliOptions) => {
@@ -177,9 +190,11 @@ program
   .option("--store <dir>", "store used when <session> is an id or latest", ".rewind")
   .option("--step <n>", "tool-call step; defaults to the first tool call", parseInteger)
   .option("--name <name>", "tool name; useful when the tool appears once")
+  .option("--json", "print machine-readable JSON")
   .description("Print recorded tool args, result, or error")
-  .action(async (session: string, opts: SessionSelectorOptions & { step?: number; name?: string }) => {
-    console.log(JSON.stringify(formatToolCall(await readToolCall(session, opts)), null, 2));
+  .action(async (session: string, opts: SessionSelectorOptions & { step?: number; name?: string; json?: boolean }) => {
+    const tool = formatToolCall(await readToolCall(session, opts));
+    console.log(opts.json ? JSON.stringify(tool, null, 2) : formatToolCallText(tool));
   });
 
 program
@@ -250,6 +265,16 @@ interface SessionListRow {
   usage: Usage;
 }
 
+interface TimelineCliOptions {
+  kind?: RewindEvent["kind"][];
+  site?: string;
+  errors?: boolean;
+  live?: boolean;
+  from?: number;
+  to?: number;
+  fullFingerprint?: boolean;
+}
+
 type ForkProviderKind = "openai" | "openai-compatible" | "openrouter" | "anthropic";
 type ForkToolMissPolicy = "error" | "stub";
 
@@ -270,6 +295,7 @@ interface ForkCliOptions extends SessionSelectorOptions {
   appCategories?: string;
   toolMiss?: string;
   dryRun?: boolean;
+  checkProvider?: boolean;
   json?: boolean;
 }
 
@@ -308,7 +334,8 @@ async function runForkCommand(session: string, opts: ForkCliOptions): Promise<vo
   const providerKind = resolveForkProvider(stored.meta.provider, opts.provider);
   const overrides = await readForkOverrides(opts);
   const toolMiss = parseForkToolMissPolicy(opts.toolMiss ?? "error");
-  const client = createForkClient(providerKind, opts, !opts.dryRun);
+  const providerChecked = !opts.dryRun || Boolean(opts.checkProvider);
+  const client = createForkClient(providerKind, opts, providerChecked);
 
   assertForkProviderMatches(stored.meta.provider, client);
   if (client.model) {
@@ -324,6 +351,7 @@ async function runForkCommand(session: string, opts: ForkCliOptions): Promise<vo
     stepModel: selection.model,
     overrides: summarizeOverrides(overrides),
     toolMiss,
+    providerChecked,
     ...(client.apiKeyEnv ? { apiKeyEnv: client.apiKeyEnv } : {}),
     ...(client.baseURL ? { baseURL: client.baseURL } : {})
   };
@@ -618,6 +646,7 @@ function formatForkPlan(plan: {
   stepModel?: string;
   overrides: { system: boolean; model?: string };
   toolMiss: ForkToolMissPolicy;
+  providerChecked: boolean;
   apiKeyEnv?: string;
   baseURL?: string;
 }): string {
@@ -633,7 +662,9 @@ function formatForkPlan(plan: {
     ...(plan.apiKeyEnv ? [`API key env: ${plan.apiKeyEnv}`] : []),
     ...(plan.baseURL ? [`Base URL: ${plan.baseURL}`] : []),
     "",
-    "No provider call was made. Remove --dry-run to create the child session."
+    plan.providerChecked
+      ? "Dry run checked provider credentials/client shape, but made no provider call and wrote no child session."
+      : "Dry run made no provider call, wrote no child session, and did not check provider credentials. Add --check-provider to validate setup."
   ].join("\n");
 }
 
@@ -748,12 +779,56 @@ function formatToolCall(event: ToolCallEvent): Record<string, unknown> {
   };
 }
 
+function formatPromptContext(messages: NormalizedMessage[]): string {
+  if (messages.length === 0) {
+    return "No prompt messages recorded for this model call.";
+  }
+  return messages
+    .map((message, index) => {
+      const header = `${index + 1}. ${message.role}`;
+      return [header, indent(formatValue(message.content), "   ")].join("\n");
+    })
+    .join("\n\n");
+}
+
+function formatToolCallText(tool: Record<string, unknown>): string {
+  const lines = [
+    `Tool: ${String(tool.name)}`,
+    `Step: ${String(tool.step)}`,
+    `Site: ${String(tool.site)}`,
+    "",
+    "Args:",
+    indent(formatValue(tool.args), "  ")
+  ];
+  if (tool.error && tool.error !== false) {
+    lines.push("", "Error:", indent(formatValue(tool.error), "  "));
+  } else if ("result" in tool) {
+    lines.push("", "Result:", indent(formatValue(tool.result), "  "));
+  }
+  if (tool.streamed) {
+    lines.push("", "Stream:", indent(formatValue(tool.stream), "  "));
+  }
+  return lines.join("\n");
+}
+
+function formatValue(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+function indent(text: string | undefined, prefix: string): string {
+  return String(text ?? "").split("\n").map((line) => `${prefix}${line}`).join("\n");
+}
+
 function formatEntropyDraw(event: EntropyEvent): Record<string, unknown> {
   return {
     step: event.step,
     lane: event.lane,
     site: event.callSite,
     source: event.source,
+    ...(event.key ? { key: event.key } : {}),
     value: event.value,
     ...(event.provenance ? { provenance: event.provenance } : {})
   };
@@ -814,7 +889,7 @@ interface QuickstartSpec {
   env: string[];
   imports: string;
   client: string;
-  codec: string;
+  codec?: string;
   request: string;
   response: string;
 }
@@ -860,7 +935,7 @@ function formatQuickstart(inputProvider: string | undefined, manager: string, fo
     "",
     "## What This Starter Does",
     "",
-    "- Creates the real provider SDK client and validates the codec can wrap it.",
+    "- Creates a provider-bound AgentRewind helper with the right client and codec.",
     "- Records one harness run with the live model client.",
     "- Immediately replays the same harness without a live model client.",
     "- Names the model call with `site` so CLI diagnostics can target it later.",
@@ -885,7 +960,7 @@ function formatQuickstart(inputProvider: string | undefined, manager: string, fo
 
 function starterTypeScript(spec: QuickstartSpec, provider: QuickstartProvider): string {
   return [
-    "import { AgentRewind, assertProviderClient, defineHarness, explainRewindError } from \"@agentrewind/sdk\";",
+    "import { defineHarness, explainRewindError } from \"@agentrewind/sdk\";",
     spec.imports,
     "",
     "// Fail locally before recording if the provider key, base URL, or model id",
@@ -899,13 +974,17 @@ function starterTypeScript(spec: QuickstartSpec, provider: QuickstartProvider): 
     "  return value;",
     "}",
     "",
-    "// Use the same SDK client your agent already uses in production.",
-    "// AgentRewind wraps this client only while recording or for fork/live-tail calls.",
+    "// Provider presets create the SDK client, choose the matching codec, and keep",
+    "// record/replay calls from repeating the same setup.",
     spec.client,
     "",
-    "// The codec translates provider-specific SDK shapes into AgentRewind's stable",
-    "// session format. Use the same codec for record, replay, context, and fork.",
-    spec.codec,
+    ...(spec.codec
+      ? [
+          "// The codec translates provider-specific SDK shapes into AgentRewind's stable",
+          "// session format. Use the same codec for record, replay, context, and fork.",
+          spec.codec
+        ]
+      : []),
     `const sessionId = \"${provider}-demo\";`,
     "const sessionPath = `.rewind/${sessionId}`;",
     "",
@@ -925,24 +1004,13 @@ function starterTypeScript(spec: QuickstartSpec, provider: QuickstartProvider): 
     "});",
     "",
     "try {",
-    "  // Fail fast if the selected codec does not match the SDK client's method path.",
-    "  assertProviderClient(model, codec);",
-    "",
     "  // Record one live run. This is the only phase below that should spend",
     "  // provider tokens or call external tools.",
-    "  const recorded = await AgentRewind.recordRun(",
-    "    {",
-    "      id: sessionId,",
-    "      store: \".rewind\",",
-    "      model,",
-    "      codec",
-    "    },",
-    "    harness",
-    "  );",
+    "  const recorded = await rewind.recordRun({ id: sessionId }, harness);",
     "",
     "  // Replay the same harness with no model client. Strict replay serves the",
     "  // recorded model response and fails if the harness builds a different request.",
-    "  const replayed = await AgentRewind.replayRun(recorded.path, { codec }, harness);",
+    "  const replayed = await rewind.replayRun(recorded.path, harness);",
     "  console.log({ recorded: recorded.result, replayed, session: recorded.path });",
     "} catch (error) {",
     "  console.error(explainRewindError(error, { sessionPath }));",
@@ -1036,11 +1104,10 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         install: ["@agentrewind/sdk"],
         env: ["OPENAI_API_KEY=...", "OPENAI_MODEL=..."],
         imports: [
-          "import { OpenAI, openaiChatCodec } from \"@agentrewind/sdk\";",
+          "import { createOpenAIRewind } from \"@agentrewind/sdk\";",
           "import type { ChatCompletion } from \"@agentrewind/sdk\";"
         ].join("\n"),
-        client: "const model = new OpenAI({ apiKey: requiredEnv(\"OPENAI_API_KEY\") });",
-        codec: "const codec = openaiChatCodec();",
+        client: "const rewind = createOpenAIRewind({ apiKey: requiredEnv(\"OPENAI_API_KEY\"), store: \".rewind\" });",
         request: openAIRequest("requiredEnv(\"OPENAI_MODEL\")", "answer-question"),
         response: openAIResponse()
       };
@@ -1052,16 +1119,16 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         install: ["@agentrewind/sdk"],
         env: ["COMPATIBLE_API_KEY=...", "COMPATIBLE_BASE_URL=https://your-provider.example/v1", "COMPATIBLE_MODEL=..."],
         imports: [
-          "import { OpenAI, openaiChatCodec } from \"@agentrewind/sdk\";",
+          "import { createOpenAICompatibleRewind } from \"@agentrewind/sdk\";",
           "import type { ChatCompletion } from \"@agentrewind/sdk\";"
         ].join("\n"),
         client: [
-          "const model = new OpenAI({",
+          "const rewind = createOpenAICompatibleRewind({",
           "  apiKey: requiredEnv(\"COMPATIBLE_API_KEY\"),",
-          "  baseURL: requiredEnv(\"COMPATIBLE_BASE_URL\")",
+          "  baseURL: requiredEnv(\"COMPATIBLE_BASE_URL\"),",
+          "  store: \".rewind\"",
           "});"
         ].join("\n"),
-        codec: "const codec = openaiChatCodec();",
         request: openAIRequest("requiredEnv(\"COMPATIBLE_MODEL\")", "answer-question"),
         response: openAIResponse()
       };
@@ -1073,19 +1140,17 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         install: ["@agentrewind/sdk"],
         env: ["OPENROUTER_API_KEY=...", "OPENROUTER_MODEL=..."],
         imports: [
-          "import { OpenAI, openRouterChatCodec, openRouterClientOptions } from \"@agentrewind/sdk\";",
+          "import { createOpenRouterRewind } from \"@agentrewind/sdk\";",
           "import type { ChatCompletion } from \"@agentrewind/sdk\";"
         ].join("\n"),
         client: [
-          "const model = new OpenAI(",
-          "  openRouterClientOptions({",
-          "    apiKey: requiredEnv(\"OPENROUTER_API_KEY\"),",
-          "    appUrl: \"https://your-app.example\",",
-          "    appTitle: \"Your Agent\"",
-          "  })",
-          ");"
+          "const rewind = createOpenRouterRewind({",
+          "  apiKey: requiredEnv(\"OPENROUTER_API_KEY\"),",
+          "  appUrl: \"https://your-app.example\",",
+          "  appTitle: \"Your Agent\",",
+          "  store: \".rewind\"",
+          "});"
         ].join("\n"),
-        codec: "const codec = openRouterChatCodec();",
         request: openRouterRequest("requiredEnv(\"OPENROUTER_MODEL\")", "openrouter-answer"),
         response: openAIResponse()
       };
@@ -1097,11 +1162,10 @@ function quickstartSpec(provider: QuickstartProvider): QuickstartSpec {
         install: ["@agentrewind/sdk"],
         env: ["ANTHROPIC_API_KEY=...", "ANTHROPIC_MODEL=..."],
         imports: [
-          "import { Anthropic, anthropicCodec } from \"@agentrewind/sdk\";",
+          "import { createAnthropicRewind } from \"@agentrewind/sdk\";",
           "import type { AnthropicMessage } from \"@agentrewind/sdk\";"
         ].join("\n"),
-        client: "const model = new Anthropic({ apiKey: requiredEnv(\"ANTHROPIC_API_KEY\") });",
-        codec: "const codec = anthropicCodec();",
+        client: "const rewind = createAnthropicRewind({ apiKey: requiredEnv(\"ANTHROPIC_API_KEY\"), store: \".rewind\" });",
         request: anthropicRequest("requiredEnv(\"ANTHROPIC_MODEL\")", "draft-answer"),
         response: "return message.content.filter((block) => block.type === \"text\").map((block) => block.text).join(\"\");"
       };
@@ -1269,11 +1333,40 @@ function shellArg(value: string): string {
 }
 
 function parseInteger(value: string): number {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isInteger(parsed)) {
-    throw new TypeError(`Expected integer, got ${value}`);
+  if (!/^(0|[1-9]\d*)$/.test(value)) {
+    throw new TypeError(`Expected a non-negative integer, got "${value}"`);
   }
-  return parsed;
+  return Number(value);
+}
+
+function parseTimelineKinds(value: string): RewindEvent["kind"][] {
+  const kinds = value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  if (kinds.length === 0) {
+    throw new TypeError("Expected at least one event kind.");
+  }
+  for (const kind of kinds) {
+    assertTimelineKind(kind);
+  }
+  return kinds as RewindEvent["kind"][];
+}
+
+function assertTimelineKind(kind: string): asserts kind is RewindEvent["kind"] {
+  switch (kind) {
+    case "session_start":
+    case "model_call":
+    case "tool_call":
+    case "entropy":
+    case "note":
+    case "session_end":
+      return;
+    default:
+      throw new TypeError(
+        `Unknown event kind "${kind}". Use session_start, model_call, tool_call, entropy, note, or session_end.`
+      );
+  }
 }
 
 function parseEntropySource(value: string): EntropyEvent["source"] {
@@ -1281,8 +1374,9 @@ function parseEntropySource(value: string): EntropyEvent["source"] {
     case "clock":
     case "random":
     case "uuid":
+    case "env":
       return value;
     default:
-      throw new TypeError(`Unknown entropy source "${value}". Use clock, random, or uuid.`);
+      throw new TypeError(`Unknown entropy source "${value}". Use clock, random, uuid, or env.`);
   }
 }

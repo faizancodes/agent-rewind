@@ -1,10 +1,113 @@
-export * from "@agentrewind/core";
-export * from "@agentrewind/codec-anthropic";
-export * from "@agentrewind/codec-openai";
-export * from "@agentrewind/codec-openrouter";
-export * from "@agentrewind/test";
+export {
+  AgentRewind,
+  assertCodecConformance,
+  assertProviderClient,
+  assertProviderCodec,
+  defineAgent,
+  defineHarness,
+  defineTools,
+  diffPromptContext,
+  entropyDrawForInspection,
+  explainRewindError,
+  listSessionSummaries,
+  modelEventForContext,
+  modelEventsForDiff,
+  readEntropyDraw,
+  readPromptContext,
+  readSessionSummary,
+  readSessionTimeline,
+  readToolCall,
+  replayRun,
+  summarizeSession,
+  toolCallForInspection
+} from "@agentrewind/core";
+export {
+  CodecError,
+  ConfigurationError,
+  DriftError,
+  FingerprintError,
+  MigrationError,
+  PurityLintError,
+  RewindError,
+  SessionStoreError,
+  SerializationError,
+  VaultError
+} from "@agentrewind/core";
+export type {
+  AgentContext,
+  AgentDefinition,
+  BoundAgentRewind,
+  BoundRecordOptions,
+  BoundReplayOptions,
+  ChunkRecord,
+  CodecConformanceCase,
+  CodecConformanceOptions,
+  ContextDiff,
+  EntropyEvent,
+  EntropyInspectionOptions,
+  EventKind,
+  EventProvenance,
+  FingerprintMode,
+  ForkOptions,
+  ForkOverrides,
+  ForkResult,
+  Harness,
+  HarnessOrAgent,
+  ModelCallEvent,
+  NormalizedMessage,
+  NormalizedRequest,
+  NormalizedResponse,
+  ProviderBindingOptions,
+  ProviderCodec,
+  ProviderRequest,
+  ProviderResponse,
+  ProviderStreamChunk,
+  PromptContextOptions,
+  PromptDiffOptions,
+  RecordOptions,
+  RecordRunResult,
+  RedactionConfig,
+  Replay,
+  ReplayOptions,
+  ReplayRunOptions,
+  RewindEvent,
+  SerializedError,
+  Session,
+  SessionSummary,
+  SessionTimelineOptions,
+  SessionTimelineRow,
+  ToolCallEvent,
+  ToolCallInspectionOptions,
+  ToolHandler,
+  ToolHandlers,
+  ToolSerializers,
+  ToolValueSerializer,
+  Usage,
+  WrappedModel,
+  WrappedTools
+} from "@agentrewind/core";
+
+export { anthropicCodec, anthropicProviderCodec } from "@agentrewind/codec-anthropic";
+export {
+  openAIChatCodec,
+  openAICompatibleCodec,
+  openAIProviderCodec,
+  openaiChatCodec,
+  openaiProviderCodec
+} from "@agentrewind/codec-openai";
+export {
+  OPENROUTER_BASE_URL,
+  openRouterChatCodec,
+  openRouterClientOptions,
+  openRouterProviderCodec,
+  openrouterChatCodec,
+  openrouterProviderCodec
+} from "@agentrewind/codec-openrouter";
+export type { OpenRouterClientOptions, OpenRouterOpenAIClientOptions } from "@agentrewind/codec-openrouter";
+
+export * from "./presets.js";
 
 export { default as Anthropic } from "@anthropic-ai/sdk";
 export { default as OpenAI } from "openai";
 export type { Message as AnthropicMessage, RawMessageStreamEvent as AnthropicRawMessageStreamEvent } from "@anthropic-ai/sdk/resources/messages/messages";
-export type { ChatCompletion, ChatCompletionChunk } from "openai/resources/chat/completions";
+export type { ChatCompletion, ChatCompletionChunk, ChatCompletionCreateParamsBase } from "openai/resources/chat/completions";

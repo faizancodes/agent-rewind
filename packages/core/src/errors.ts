@@ -228,7 +228,7 @@ function hintsFor(error: Error, data: Record<string, unknown>): string[] {
   const message = error.message.toLowerCase();
   if (message.includes("model call drifted")) {
     hints.push("Keep the same `ctx.model.create()` or `ctx.model.stream()` request shape during strict replay.");
-    hints.push("Use `ctx.uuid()`, `ctx.clock()`, and `ctx.random()` for prompt-affecting entropy.");
+    hints.push("Use `ctx.uuid()`, `ctx.clock()`, `ctx.random()`, and `ctx.env(key)` for prompt-affecting entropy.");
     hints.push("Give the model call a stable `{ site: \"...\" }` name so drift points to the logical operation.");
   } else if (message.includes("tool call drifted")) {
     hints.push("Route external work through `ctx.tools.<name>()` with stable JSON-serializable arguments.");

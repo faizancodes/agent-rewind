@@ -22,22 +22,22 @@ export class EntropyReplay {
       if (event.kind !== "entropy") {
         continue;
       }
-      const key = queueKey(event.lane, event.source);
+      const key = queueKey(event.lane, event.source, event.key);
       const queue = this.queues.get(key) ?? [];
       queue.push(event);
       this.queues.set(key, queue);
     }
   }
 
-  peek(source: EntropyEvent["source"], lane: string): EntropyEvent | undefined {
-    return this.queues.get(queueKey(lane, source))?.[0];
+  peek(source: EntropyEvent["source"], lane: string, key?: string): EntropyEvent | undefined {
+    return this.queues.get(queueKey(lane, source, key))?.[0];
   }
 
-  nextEvent(source: EntropyEvent["source"], lane: string, driftPolicy: "strict" | "warn" | "passthrough" = "strict"): EntropyEvent {
-    const queue = this.queues.get(queueKey(lane, source));
+  nextEvent(source: EntropyEvent["source"], lane: string, driftPolicy: "strict" | "warn" | "passthrough" = "strict", key?: string): EntropyEvent {
+    const queue = this.queues.get(queueKey(lane, source, key));
     const event = queue?.shift();
     if (!event) {
-      const error = new DriftError("Missing recorded entropy event", { source, lane });
+      const error = new DriftError("Missing recorded entropy event", { source, lane, ...(key ? { key } : {}) });
       if (driftPolicy === "warn") {
         console.warn(error.message, error.data);
       }
@@ -46,8 +46,8 @@ export class EntropyReplay {
     return event;
   }
 
-  next(source: EntropyEvent["source"], lane: string, driftPolicy: "strict" | "warn" | "passthrough" = "strict"): number | string {
-    return this.nextEvent(source, lane, driftPolicy).value;
+  next(source: EntropyEvent["source"], lane: string, driftPolicy: "strict" | "warn" | "passthrough" = "strict", key?: string): number | string | null {
+    return this.nextEvent(source, lane, driftPolicy, key).value;
   }
 
   remaining(): EntropyEvent[] {
@@ -59,6 +59,6 @@ export class EntropyReplay {
   }
 }
 
-function queueKey(lane: string, source: EntropyEvent["source"]): string {
-  return `${lane}\u0000${source}`;
+function queueKey(lane: string, source: EntropyEvent["source"], key: string | undefined): string {
+  return `${lane}\u0000${source}\u0000${key ?? ""}`;
 }

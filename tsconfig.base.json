@@ -20,7 +20,11 @@
       "@agentrewind/codec-openai": ["packages/codec-openai/src/index.ts"],
       "@agentrewind/codec-openrouter": ["packages/codec-openrouter/src/index.ts"],
       "@agentrewind/test": ["packages/test/src/index.ts"],
-      "@agentrewind/sdk": ["packages/sdk/src/index.ts"]
+      "@agentrewind/sdk": ["packages/sdk/src/index.ts"],
+      "@agentrewind/sdk/advanced": ["packages/sdk/src/advanced.ts"],
+      "@agentrewind/sdk/codecs": ["packages/sdk/src/codecs.ts"],
+      "@agentrewind/sdk/providers": ["packages/sdk/src/providers.ts"],
+      "@agentrewind/sdk/testing": ["packages/sdk/src/testing.ts"]
     }
   },
   "include": ["packages/**/*.ts", "vitest.config.ts", "examples/**/*.ts"]

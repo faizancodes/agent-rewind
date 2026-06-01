@@ -6,22 +6,19 @@ Single-install package for AgentRewind.
 npm install @agentrewind/sdk
 ```
 
-This package installs and re-exports the public `@agentrewind/core` API, the
-`agentrewind` / `arw` CLI binaries, built-in provider codecs, OpenAI and
-Anthropic clients, and replay test helpers.
+This package installs the runtime, `agentrewind` / `arw` CLI binaries, built-in
+provider codecs, OpenAI and Anthropic clients, and replay test helpers. The root
+export is for normal app code; use `@agentrewind/sdk/testing` for test helpers
+and `@agentrewind/sdk/advanced` for lower-level internals.
 
 ```ts
-import { AgentRewind, OpenAI, assertProviderClient, defineHarness, defineTools, openaiChatCodec } from "@agentrewind/sdk";
+import { AgentRewind, createOpenAIRewind, defineAgent, defineHarness, defineTools } from "@agentrewind/sdk";
 import type { ChatCompletion } from "@agentrewind/sdk";
-
-const model = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const codec = openaiChatCodec();
-
-assertProviderClient(model, codec);
 
 const tools = defineTools({
   lookupCustomer: async (args: { customerId: string }) => ({ id: args.customerId })
 });
+const rewind = createOpenAIRewind({ store: ".rewind", tools });
 
 const harness = defineHarness(tools, async (ctx) => {
   const customer = await ctx.tools.lookupCustomer({ customerId: "cus_123" });
@@ -35,38 +32,19 @@ const harness = defineHarness(tools, async (ctx) => {
 
   return completion.choices[0]?.message.content ?? "";
 });
+const agent = defineAgent({ tools, harness });
 
-const recorded = await AgentRewind.recordRun(
-  {
-    id: "support-summary",
-    store: ".rewind",
-    model,
-    codec,
-    tools
-  },
-  harness
-);
+const recorded = await rewind.recordRun({ id: "support-summary" }, agent);
 
-const replayed = await AgentRewind.replayRun(recorded.path, { codec }, harness);
+const replayed = await rewind.replayRun(recorded.path, agent);
 
 // Once sessions exist, replay APIs can resolve ids and `latest` from a store.
-await AgentRewind.replayRun("latest", { store: ".rewind", codec }, harness);
+await rewind.replayRun("latest", agent);
 const summary = await AgentRewind.summary("latest", { store: ".rewind" });
-const summaries = await AgentRewind.listSessionSummaries(".rewind");
-const timeline = await AgentRewind.timeline("latest", { store: ".rewind" });
 const prompt = await AgentRewind.promptContext("latest", {
   store: ".rewind",
   site: "summarize-customer"
 });
-const toolCall = await AgentRewind.toolCall("latest", {
-  store: ".rewind",
-  name: "lookupCustomer"
-});
-const entropy = await AgentRewind.entropyDraw("latest", {
-  store: ".rewind",
-  source: "uuid"
-});
-await AgentRewind.pack("latest", "latest-session.rewind", { store: ".rewind" });
 ```
 
 See the repository README for the full record, replay, fork, redaction, CLI,

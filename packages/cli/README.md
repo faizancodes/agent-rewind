@@ -17,10 +17,13 @@ agentrewind doctor <session>
 agentrewind doctor <session-id> --store .rewind
 agentrewind doctor latest --store .rewind
 agentrewind inspect <session>
+agentrewind timeline <session> --kind model_call --site <name>
 agentrewind inspect <session> --json
 agentrewind context <session>
+agentrewind prompt <session> --site <name>
 agentrewind context <session> --step <n>
 agentrewind context <session> --site <name>
+agentrewind context <session> --json
 agentrewind diff <session>
 agentrewind diff <session> --from <a> --to <b>
 agentrewind diff <session> --from-site <a> --to-site <b>
@@ -29,6 +32,7 @@ agentrewind fork latest --store .rewind --step <n> --model <model-id>
 agentrewind tool <session>
 agentrewind tool <session> --name <tool>
 agentrewind tool <session> --step <n>
+agentrewind tool <session> --json
 agentrewind entropy <session>
 agentrewind entropy <session> --source uuid
 agentrewind entropy <session> --step <n>
@@ -67,27 +71,32 @@ arw inspect <session>
   usage, and suggested next commands. Use `--json` for automation.
 - `inspect` prints a labeled timeline table with `step`, `kind`, `lane`,
   `site`, a short fingerprint, request detail, token usage, and flags such as
-  `stream`, `error`, or `provenance=live`. Use `--json` for automation or
-  `--no-header` for compact TSV output.
+  `stream`, `error`, or `provenance=live`. `timeline` is an alias. Use
+  `--kind`, `--site`, `--errors`, `--live`, `--from`, and `--to` to focus large
+  sessions. Use `--full-fingerprint` when comparing exact request/tool hashes,
+  `--json` for automation, or `--no-header` for compact TSV output.
 - `context` and `diff` operate on model-call steps. By default, `context`
-  prints the first model call and `diff` compares the first two model calls.
-  Pass `--site`, `--from-site`, or `--to-site` when you know the stable `site`
-  name from your harness. Pass `--step`, `--from`, or `--to` when you need a
-  specific numeric step from `inspect`.
+  prints a readable view of the first model call and `diff` compares the first
+  two model calls. `prompt` is an alias for `context`; add `--json` for the raw
+  recorded message array. Pass `--site`, `--from-site`, or `--to-site` when you
+  know the stable `site` name from your harness. Pass `--step`, `--from`, or
+  `--to` when you need a specific numeric step from `inspect`.
 - `fork` starts at a recorded model-call step, reuses the recorded prefix, and
   sends the tail to a live provider client. Pick the fork point with `--site` or
   `--step`, change the live tail with `--system` and/or `--model`, and add
-  `--dry-run` to verify the plan without spending provider tokens. Built-in
+  `--dry-run` to verify the plan without spending provider tokens. Dry runs do
+  not check credentials unless you add `--check-provider`. Built-in
   providers are `openai`, `openai-compatible`, `openrouter`, and `anthropic`.
   API keys are read from `OPENAI_API_KEY`, `COMPATIBLE_API_KEY`,
   `OPENROUTER_API_KEY`, or `ANTHROPIC_API_KEY`; generic compatible endpoints
   also need `COMPATIBLE_BASE_URL` or `--base-url`.
-- `tool` prints a recorded tool call as JSON, including `args`, `result`,
-  `error`, stream chunks, latency, and provenance. Use `--name` when the tool
-  appears once, or `--step` after `inspect` when a tool appears more than once.
-- `entropy` prints a recorded `ctx.clock()`, `ctx.random()`, or `ctx.uuid()`
-  draw as JSON. Use `--source` when that source appears once, or `--step` after
-  `inspect` when the same source appears more than once.
+- `tool` prints a readable recorded tool call by default. Add `--json` for
+  `args`, `result`, `error`, stream chunks, latency, and provenance as JSON.
+  Use `--name` when the tool appears once, or `--step` after `inspect` when a
+  tool appears more than once.
+- `entropy` prints a recorded `ctx.clock()`, `ctx.random()`, `ctx.uuid()`, or
+  `ctx.env()` draw as JSON. Use `--source` when that source appears once, or
+  `--step` after `inspect` when the same source appears more than once.
 - `pack` excludes the local vault and prints a redaction summary before writing
   the `.rewind` bundle.
 - Session read failures are formatted as AgentRewind errors. If a command cannot

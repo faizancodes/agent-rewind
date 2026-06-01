@@ -1,5 +1,10 @@
 import type { ProviderCodec } from "@agentrewind/core";
 import { openaiChatCodec } from "@agentrewind/codec-openai";
+import type {
+  ChatCompletion,
+  ChatCompletionChunk,
+  ChatCompletionCreateParamsBase
+} from "openai/resources/chat/completions";
 
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
@@ -17,7 +22,7 @@ export interface OpenRouterOpenAIClientOptions {
   defaultHeaders?: Record<string, string>;
 }
 
-export function openRouterChatCodec(): ProviderCodec {
+export function openRouterChatCodec(): ProviderCodec<ChatCompletionCreateParamsBase, ChatCompletion, ChatCompletionChunk> {
   return {
     ...openaiChatCodec(),
     name: "openrouter-chat"

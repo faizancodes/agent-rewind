@@ -19,7 +19,7 @@ import type {
   RawMessageStreamEvent
 } from "@anthropic-ai/sdk/resources/messages/messages";
 
-export function anthropicCodec(): ProviderCodec {
+export function anthropicCodec(): ProviderCodec<MessageCreateParamsBase, Message, RawMessageStreamEvent> {
   return {
     name: "anthropic",
     interceptPoints: ["messages.create", "messages.stream"],
@@ -58,7 +58,7 @@ function denormalizeRequest(req: NormalizedRequest): unknown {
     model,
     messages: messages.filter((message) => message.role !== "system").map(denormalizeMessage),
     ...(system !== undefined ? { system } : {})
-  } satisfies Partial<MessageCreateParamsBase>;
+  } as MessageCreateParamsBase;
 }
 
 function normalizeResponse(raw: unknown): NormalizedResponse {
@@ -80,9 +80,9 @@ function normalizeStream(rawChunks: unknown[]): { final: NormalizedResponse; chu
   };
 }
 
-async function* rebuildStream(chunks: ChunkRecord[]): AsyncIterable<unknown> {
+async function* rebuildStream(chunks: ChunkRecord[]): AsyncIterable<RawMessageStreamEvent> {
   for (const chunk of chunks) {
-    yield chunk.data;
+    yield chunk.data as RawMessageStreamEvent;
   }
 }
 

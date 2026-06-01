@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Dirent } from "node:fs";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { gzip, gunzip } from "node:zlib";
 import type { Hash, RewindEvent, SessionMeta } from "./events.js";
@@ -38,21 +38,43 @@ export async function writeSession(
   threshold = BLOB_THRESHOLD_BYTES
 ): Promise<SessionMeta> {
   const sessionPath = safeSessionPath(store, meta.id);
-  const blobsPath = join(sessionPath, "blobs");
-  await mkdir(blobsPath, { recursive: true });
-
-  const storedEvents: RewindEvent[] = [];
-  for (const event of [...events].sort((a, b) => a.step - b.step)) {
-    storedEvents.push(await externalizeEvent(event, blobsPath, threshold));
+  await mkdir(store, { recursive: true });
+  let createdSessionPath = false;
+  try {
+    await mkdir(sessionPath);
+    createdSessionPath = true;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "EEXIST") {
+      throw new SessionStoreError("AgentRewind session already exists", {
+        sessionPath,
+        sessionId: meta.id,
+        expected: "Use a new session id. AgentRewind does not overwrite existing session directories."
+      });
+    }
+    throw error;
   }
+  try {
+    const blobsPath = join(sessionPath, "blobs");
+    await mkdir(blobsPath, { recursive: true });
 
-  const jsonl = `${storedEvents.map((event) => JSON.stringify(event)).join("\n")}\n`;
-  const eventsHash = sha256(Buffer.from(jsonl, "utf8"));
-  await writeFile(join(sessionPath, "events.jsonl"), jsonl, "utf8");
-  await saveVault(join(sessionPath, "vault.enc"), vault);
-  const finalMeta: SessionMeta = { ...meta, eventsHash };
-  await writeFile(join(sessionPath, "meta.json"), `${JSON.stringify(finalMeta, null, 2)}\n`, "utf8");
-  return finalMeta;
+    const storedEvents: RewindEvent[] = [];
+    for (const event of [...events].sort((a, b) => a.step - b.step)) {
+      storedEvents.push(await externalizeEvent(event, blobsPath, threshold));
+    }
+
+    const jsonl = `${storedEvents.map((event) => JSON.stringify(event)).join("\n")}\n`;
+    const eventsHash = sha256(Buffer.from(jsonl, "utf8"));
+    await writeFile(join(sessionPath, "events.jsonl"), jsonl, { encoding: "utf8", flag: "wx" });
+    await saveVault(join(sessionPath, "vault.enc"), vault);
+    const finalMeta: SessionMeta = { ...meta, eventsHash };
+    await writeFile(join(sessionPath, "meta.json"), `${JSON.stringify(finalMeta, null, 2)}\n`, { encoding: "utf8", flag: "wx" });
+    return finalMeta;
+  } catch (error) {
+    if (createdSessionPath) {
+      await rm(sessionPath, { recursive: true, force: true });
+    }
+    throw error;
+  }
 }
 
 export async function readSession(sessionPath: string): Promise<StoredSession> {
@@ -495,7 +517,13 @@ function blobPathForHash(blobsPath: string, hash: Hash): string {
 async function listPackFiles(sessionPathValue: string): Promise<string[]> {
   const out: string[] = [];
   async function visit(path: string): Promise<void> {
-    const info = await stat(path);
+    const info = await lstat(path);
+    if (info.isSymbolicLink()) {
+      throw new SessionStoreError("Packed session contains a symbolic link", {
+        path,
+        expected: "Session bundles may only include regular files and directories."
+      });
+    }
     if (info.isDirectory()) {
       for (const child of await readdir(path)) {
         if (child === "vault.enc" || child === "vault.enc.key") {
@@ -504,6 +532,12 @@ async function listPackFiles(sessionPathValue: string): Promise<string[]> {
         await visit(join(path, child));
       }
       return;
+    }
+    if (!info.isFile()) {
+      throw new SessionStoreError("Packed session contains a non-file entry", {
+        path,
+        expected: "Session bundles may only include regular files and directories."
+      });
     }
     out.push(path);
   }
@@ -583,8 +617,33 @@ function readTar(buffer: Buffer): TarEntry[] {
     }
     const name = header.subarray(0, 100).toString("utf8").replace(/\0.*$/, "");
     const sizeText = header.subarray(124, 136).toString("utf8").replace(/\0.*$/, "").trim();
+    if (!/^[0-7]+$/.test(sizeText || "0")) {
+      throw new SessionStoreError("Packed session contains an invalid tar size", {
+        entry: name,
+        size: sizeText
+      });
+    }
     const size = Number.parseInt(sizeText || "0", 8);
+    if (!Number.isSafeInteger(size) || size < 0) {
+      throw new SessionStoreError("Packed session contains an invalid tar size", {
+        entry: name,
+        size: sizeText
+      });
+    }
+    const type = header.subarray(156, 157).toString("ascii");
+    if (type !== "" && type !== "\0" && type !== "0") {
+      throw new SessionStoreError("Packed session contains an unsupported tar entry type", {
+        entry: name,
+        type
+      });
+    }
     const dataStart = offset + 512;
+    if (dataStart + size > buffer.length) {
+      throw new SessionStoreError("Packed session tar entry exceeds archive size", {
+        entry: name,
+        size
+      });
+    }
     entries.push({ name, data: buffer.subarray(dataStart, dataStart + size) });
     offset = dataStart + size + ((512 - (size % 512)) % 512);
   }

@@ -15,7 +15,8 @@ Use `assertReplay()` when the test only needs to prove that the current harness
 still matches a stored recording:
 
 ```ts
-import { assertReplay, defineHarness, openaiChatCodec } from "@agentrewind/sdk";
+import { defineHarness, openaiChatCodec } from "@agentrewind/sdk";
+import { assertReplay } from "@agentrewind/sdk/testing";
 
 const harness = defineHarness(async (ctx) => {
   await ctx.model.create(
@@ -39,7 +40,8 @@ Use `fromSession()` when the test needs to inspect recorded events before
 running the replay assertion:
 
 ```ts
-import { defineHarness, fromSession, openaiChatCodec } from "@agentrewind/sdk";
+import { defineHarness, openaiChatCodec } from "@agentrewind/sdk";
+import { fromSession } from "@agentrewind/sdk/testing";
 
 const session = await fromSession("demo", {
   store: ".rewind",

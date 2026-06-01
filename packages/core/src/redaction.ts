@@ -59,6 +59,7 @@ export class Vault {
   }
 
   static fromJSON(payload: VaultPayload): Vault {
+    assertVaultPayload(payload);
     const vault = new Vault();
     for (const [token, secret] of Object.entries(payload.entries)) {
       vault.add(token, secret);
@@ -157,23 +158,44 @@ export async function saveVault(path: string, vault: Vault): Promise<void> {
 }
 
 export async function loadVault(path: string): Promise<Vault> {
+  let info: Awaited<ReturnType<typeof stat>>;
   try {
-    await stat(path);
-  } catch {
-    return new Vault();
+    info = await stat(path);
+  } catch (error) {
+    if (isNodeError(error) && error.code === "ENOENT") {
+      return new Vault();
+    }
+    throw new VaultError("Unable to inspect vault file", {
+      path,
+      cause: error instanceof Error ? error.message : String(error)
+    });
   }
-  const key = await getOrCreateLocalKey(`${path}.key`);
-  const payload = await readFile(path);
-  if (payload.subarray(0, 5).toString("utf8") !== "ARWV1") {
-    throw new VaultError("Unsupported vault format", { path });
+  if (!info.isFile()) {
+    throw new VaultError("Vault path is not a file", { path });
   }
-  const iv = payload.subarray(5, 17);
-  const tag = payload.subarray(17, 33);
-  const encrypted = payload.subarray(33);
-  const decipher = createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(tag);
-  const plaintext = Buffer.concat([decipher.update(encrypted), decipher.final()]);
-  return Vault.fromJSON(JSON.parse(plaintext.toString("utf8")) as VaultPayload);
+
+  try {
+    const key = await readLocalKey(`${path}.key`);
+    const payload = await readFile(path);
+    if (payload.subarray(0, 5).toString("utf8") !== "ARWV1") {
+      throw new VaultError("Unsupported vault format", { path });
+    }
+    const iv = payload.subarray(5, 17);
+    const tag = payload.subarray(17, 33);
+    const encrypted = payload.subarray(33);
+    const decipher = createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAuthTag(tag);
+    const plaintext = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    return Vault.fromJSON(JSON.parse(plaintext.toString("utf8")) as VaultPayload);
+  } catch (error) {
+    if (error instanceof VaultError) {
+      throw error;
+    }
+    throw new VaultError("Unable to read or decrypt vault", {
+      path,
+      cause: error instanceof Error ? error.message : String(error)
+    });
+  }
 }
 
 function sha256hex(value: string): string {
@@ -188,14 +210,57 @@ async function getOrCreateLocalKey(path: string): Promise<Buffer> {
     }
     return existing;
   } catch (error) {
-    if (isNodeError(error) && error.code !== "ENOENT") {
+    if (error instanceof VaultError) {
       throw error;
     }
-    await mkdir(dirname(path), { recursive: true });
-    const key = vaultCrypto.randomBytes(32);
-    await writeFile(path, key, { mode: 0o600 });
-    await chmod(path, 0o600);
-    return key;
+    if (isNodeError(error) && error.code === "ENOENT") {
+      await mkdir(dirname(path), { recursive: true });
+      const key = vaultCrypto.randomBytes(32);
+      await writeFile(path, key, { mode: 0o600 });
+      await chmod(path, 0o600);
+      return key;
+    }
+    throw new VaultError("Unable to read local vault key", {
+      path,
+      cause: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+async function readLocalKey(path: string): Promise<Buffer> {
+  try {
+    const existing = await readFile(path);
+    if (existing.length !== 32) {
+      throw new VaultError("Invalid local vault key length", { path });
+    }
+    return existing;
+  } catch (error) {
+    if (error instanceof VaultError) {
+      throw error;
+    }
+    if (isNodeError(error) && error.code === "ENOENT") {
+      throw new VaultError("Missing local vault key for encrypted vault", { path });
+    }
+    throw new VaultError("Unable to read local vault key", {
+      path,
+      cause: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+function assertVaultPayload(payload: VaultPayload): void {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    payload.version !== 1 ||
+    payload.entries === null ||
+    typeof payload.entries !== "object" ||
+    Array.isArray(payload.entries) ||
+    !Object.values(payload.entries).every((secret) => typeof secret === "string")
+  ) {
+    throw new VaultError("Invalid vault payload", {
+      expected: "Vault payload must have version=1 and string entries."
+    });
   }
 }
 

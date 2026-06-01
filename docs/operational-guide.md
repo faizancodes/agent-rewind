@@ -119,7 +119,8 @@ Record a golden trajectory locally, commit or upload the safe packed artifact
 according to your project policy, and assert it in tests:
 
 ```ts
-import { fromSession, openaiChatCodec } from "@agentrewind/sdk";
+import { openaiChatCodec } from "@agentrewind/sdk";
+import { fromSession } from "@agentrewind/sdk/testing";
 
 test("support router trajectory is stable", async () => {
   const session = await fromSession("support-router", {

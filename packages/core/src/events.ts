@@ -10,6 +10,7 @@ export type EventKind =
 
 export type FingerprintMode = "strict" | "structural";
 export type EventProvenance = "recorded" | "live" | "stub" | "synthetic";
+export type EntropySource = "clock" | "random" | "uuid" | "env";
 
 export interface BaseEvent {
   seq: number;
@@ -52,8 +53,10 @@ export interface ToolCallEvent extends BaseEvent {
 
 export interface EntropyEvent extends BaseEvent {
   kind: "entropy";
-  source: "clock" | "random" | "uuid";
-  value: number | string;
+  source: EntropySource;
+  /** Environment variable name when `source` is `env`. */
+  key?: string;
+  value: number | string | null;
   provenance?: EventProvenance;
 }
 

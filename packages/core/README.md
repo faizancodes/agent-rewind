@@ -2,9 +2,9 @@
 
 Dependency-free Node 20 ESM runtime for AgentRewind.
 
-Most users should install the umbrella package, `@agentrewind/sdk`, plus one provider
-codec. Use `@agentrewind/core` directly when you want the runtime without the
-CLI package.
+Most users should install the umbrella package, `@agentrewind/sdk`. Use
+`@agentrewind/core` directly when you want the runtime without the CLI package
+or bundled provider clients.
 
 ## API Surface
 
@@ -17,6 +17,8 @@ Core exports:
 - `AgentRewind.record()` for live recording.
 - `AgentRewind.recordRun()` for the common record-once-and-close flow.
 - `AgentRewind.replayRun()` for the common load-and-run replay flow.
+- `AgentRewind.withProvider()` for binding `{ model, codec, store, tools }`
+  once and reusing that setup for record/replay helpers.
 - `AgentRewind.replay()` for strict, warning, or passthrough replay.
 - `AgentRewind.listSessions()` and `AgentRewind.resolveSessionPath()` for
   finding sessions in a store without manually joining `.rewind/<id>` paths.
@@ -30,17 +32,19 @@ Core exports:
 - `AgentRewind.toolCall()` for reading recorded tool args, result, error,
   latency, and provenance by tool name or step.
 - `AgentRewind.entropyDraw()` for reading recorded `ctx.clock()`,
-  `ctx.random()`, or `ctx.uuid()` values by source or step.
+  `ctx.random()`, `ctx.uuid()`, or `ctx.env()` values by source or step.
 - `AgentRewind.pack()` and `AgentRewind.unpack()` for programmatic bundle
   creation/restoration; `pack()` accepts the same session selectors as replay.
 - `assertProviderClient()` for failing fast when a codec does not match the SDK
   client shape.
-- `assertProviderCodec()` for failing fast when a custom codec is incomplete or
-  malformed.
+- `assertProviderCodec()` and `assertCodecConformance()` for failing fast when
+  a custom codec is incomplete or cannot normalize/store/rebuild fixtures.
 - `Replay.fork()` for replay-prefix/live-tail forking.
 - `defineTools()` for preserving tool argument/result types in `ctx.tools`.
 - `defineHarness()` for preserving harness return types and tool-aware
   `ctx.tools` types without manual generic annotations.
+- `defineAgent({ tools, harness })` for carrying tool handlers and harnesses
+  together at runtime.
 - Session store helpers for JSONL sessions, blobs, vaults, pack, and unpack.
 - Fingerprinting, redaction, migration, token usage, typed errors, and
   `explainRewindError()` for readable drift diagnostics.
@@ -103,7 +107,7 @@ await AgentRewind.unpack("latest-session.rewind", "unpacked-session");
 Harness code must route external boundaries through `ctx`:
 
 ```ts
-import { defineHarness, defineTools } from "@agentrewind/core";
+import { defineAgent, defineHarness, defineTools } from "@agentrewind/core";
 
 const tools = defineTools({
   lookup: async (args: { id: string }) => ({ id: args.id, plan: "enterprise" as const })
@@ -115,17 +119,20 @@ const harness = defineHarness(tools, async (ctx) => {
   const result = await ctx.tools.lookup({ id });
   return { response, result };
 });
+const agent = defineAgent({ tools, harness });
 ```
 
-Use `ctx.clock()`, `ctx.random()`, and `ctx.uuid()` instead of ambient globals
-when those values affect prompts, tool args, or control flow.
+Use `ctx.clock()`, `ctx.random()`, `ctx.uuid()`, and `ctx.env(key)` instead of
+ambient globals when those values affect prompts, tool args, or control flow.
+Strict replay serves the recorded values instead of reading live environment
+state.
 
 If the harness calls `ctx.tools.someTool()` during recording but the session was
 created without a matching tool handler, AgentRewind throws a
 `ConfigurationError` that names the missing tool and lists the configured tools.
-The usual fix is to pass the same `tools` object to
-`defineHarness(tools, harness)` and the `tools` option on `AgentRewind.record()`
-or `AgentRewind.recordRun()`.
+The usual fix is to use `defineAgent({ tools, harness })`, or pass the same
+`tools` object to `defineHarness(tools, harness)` and the `tools` option on
+`AgentRewind.record()` or `AgentRewind.recordRun()`.
 
 Tool arguments, tool results, model requests, and normalized model responses
 must be JSON-compatible. Use `toolSerializers` for tool values that need runtime

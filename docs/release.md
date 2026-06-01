@@ -18,12 +18,14 @@ tarballs.
 Before publishing:
 
 ```sh
+pnpm release:check
 pnpm check
-pnpm pack:packages
 pnpm publish:dry-run
 ```
 
-Inspect `.npm-pack/*.tgz` if you need to verify exact package contents.
+`pnpm check` includes typecheck, split unit/CLI tests, build, examples, and a
+packed-package import/bin smoke test. Inspect `.npm-pack/*.tgz` if you need to
+verify exact package contents.
 
 When the dry run is clean and the npm account has access to the `@agentrewind`
 scope:
@@ -32,6 +34,10 @@ scope:
 npm login
 pnpm publish:npm
 ```
+
+`publish:npm` runs the npm version gate before publishing and passes npm
+provenance metadata. Tagged GitHub Actions releases run the same publish command
+with `id-token: write`.
 
 For the first scoped release, the npm account must own or have publish access
 to the `@agentrewind` scope. The scoped packages include

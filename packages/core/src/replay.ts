@@ -21,13 +21,18 @@ import { forkReplay, type ForkOptions, type ForkResult } from "./fork.js";
 
 type CallableToolHandler = (args: unknown) => unknown | Promise<unknown> | AsyncIterable<unknown>;
 
-export interface ReplayOptions<TTools extends ToolHandlers = UntypedToolHandlers> extends SessionSelectorOptions {
+export interface ReplayOptions<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> extends SessionSelectorOptions {
   /** Live model client used only for passthrough replay or fork live tails. */
   model?: unknown;
   /** Live tool handlers used only for passthrough replay. */
   tools?: TTools;
   /** Provider codec that matches the recorded session's model provider. Required for `run()` model calls and `fork()`. */
-  codec?: ProviderCodec;
+  codec?: ProviderCodec<TRequest, TResponse, TStreamChunk>;
   /** Drift behavior. Defaults to `strict`. */
   driftPolicy?: "strict" | "warn" | "passthrough";
   /** Re-emit stream chunks using recorded offsets. Defaults to false. */
@@ -38,15 +43,25 @@ export interface ReplayOptions<TTools extends ToolHandlers = UntypedToolHandlers
   runtime?: Partial<EntropyRuntime>;
 }
 
-export type ReplayRunOptions<TTools extends ToolHandlers = UntypedToolHandlers> = ReplayOptions<TTools> & {
+export type ReplayRunOptions<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> = ReplayOptions<TTools, TRequest, TResponse, TStreamChunk> & {
   /** Provider codec required when running a replay harness. */
-  codec: ProviderCodec;
+  codec: ProviderCodec<TRequest, TResponse, TStreamChunk>;
 };
 
 /** Loaded replay session. */
-export interface Replay<TTools extends ToolHandlers = UntypedToolHandlers> {
+export interface Replay<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> {
   /** Run a harness and serve recorded boundary outputs. */
-  run<T>(harness: Harness<T, TTools>): Promise<T>;
+  run<T>(harness: Harness<T, TTools, TRequest, TResponse, TStreamChunk>): Promise<T>;
   /** Return migrated session events in recorded order. */
   events(): RewindEvent[];
   /** Move the inspection cursor to a boundary step. */
@@ -56,10 +71,15 @@ export interface Replay<TTools extends ToolHandlers = UntypedToolHandlers> {
   /** Diff model request messages between two model-call steps. */
   diffContext(a: number, b: number): ContextDiff;
   /** Replay the prefix and execute the tail as a child recording. */
-  fork(opts: ForkOptions<TTools>): Promise<ForkResult>;
+  fork(opts: ForkOptions<TTools, TRequest, TResponse, TStreamChunk>): Promise<ForkResult>;
 }
 
-export class ReplaySession<TTools extends ToolHandlers = UntypedToolHandlers> implements Replay<TTools> {
+export class ReplaySession<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> implements Replay<TTools, TRequest, TResponse, TStreamChunk> {
   private matcher: PendingStore;
   private entropy: EntropyReplay;
   private lanes = new LaneManager();
@@ -68,10 +88,10 @@ export class ReplaySession<TTools extends ToolHandlers = UntypedToolHandlers> im
   private readonly callOrdinals = new Map<string, number>();
   private cursor = 0;
   private passthroughDiverged = false;
-  lastHarness: Harness<unknown, TTools> | undefined;
+  lastHarness: Harness<unknown, TTools, TRequest, TResponse, TStreamChunk> | undefined;
   readonly id: string;
 
-  private constructor(readonly stored: StoredSession, readonly opts: ReplayOptions<TTools>) {
+  private constructor(readonly stored: StoredSession, readonly opts: ReplayOptions<TTools, TRequest, TResponse, TStreamChunk>) {
     this.id = stored.meta.id;
     this.matcher = new PendingStore(stored.events);
     this.entropy = new EntropyReplay(stored.events);
@@ -82,16 +102,21 @@ export class ReplaySession<TTools extends ToolHandlers = UntypedToolHandlers> im
     this.runtime = { ...defaultEntropyRuntime, ...opts.runtime };
   }
 
-  static async load<TTools extends ToolHandlers = UntypedToolHandlers>(
+  static async load<
+    TTools extends ToolHandlers = UntypedToolHandlers,
+    TRequest = unknown,
+    TResponse = unknown,
+    TStreamChunk = unknown
+  >(
     sessionPath: string,
-    opts: ReplayOptions<TTools> = {} as ReplayOptions<TTools>
-  ): Promise<ReplaySession<TTools>> {
+    opts: ReplayOptions<TTools, TRequest, TResponse, TStreamChunk> = {} as ReplayOptions<TTools, TRequest, TResponse, TStreamChunk>
+  ): Promise<ReplaySession<TTools, TRequest, TResponse, TStreamChunk>> {
     return new ReplaySession(await readSession(await resolveSessionPath(sessionPath, opts)), opts);
   }
 
-  async run<T>(harness: Harness<T, TTools>): Promise<T> {
+  async run<T>(harness: Harness<T, TTools, TRequest, TResponse, TStreamChunk>): Promise<T> {
     this.resetRunState();
-    this.lastHarness = harness as Harness<unknown, TTools>;
+    this.lastHarness = harness as Harness<unknown, TTools, TRequest, TResponse, TStreamChunk>;
     const result = await this.lanes.run(() => harness(this.context()));
     if (!this.passthroughDiverged) {
       this.assertTrajectoryComplete();
@@ -124,11 +149,11 @@ export class ReplaySession<TTools extends ToolHandlers = UntypedToolHandlers> im
     return diffMessages(left, right);
   }
 
-  fork(opts: ForkOptions<TTools>): Promise<ForkResult> {
+  fork(opts: ForkOptions<TTools, TRequest, TResponse, TStreamChunk>): Promise<ForkResult> {
     return forkReplay(this, opts);
   }
 
-  requireCodec(operation: string): ProviderCodec {
+  requireCodec(operation: string): ProviderCodec<TRequest, TResponse, TStreamChunk> {
     if (!this.opts.codec) {
       throw new ConfigurationError(`Provider codec is required for replay ${operation}`, {
         missing: "codec",
@@ -140,22 +165,25 @@ export class ReplaySession<TTools extends ToolHandlers = UntypedToolHandlers> im
     return this.opts.codec;
   }
 
-  private context(): AgentContext<TTools> {
+  private context(): AgentContext<TTools, TRequest, TResponse, TStreamChunk> {
     return {
       model: this.replayModel(),
       tools: this.replayTools(this.opts.tools ?? {}),
       clock: () => this.replayEntropy("clock") as number,
       random: () => this.replayEntropy("random") as number,
       uuid: () => this.replayEntropy("uuid") as string,
-      env: (key: string) => process.env[key],
+      env: (key: string) => {
+        const value = this.replayEntropy("env", key);
+        return value === null ? undefined : String(value);
+      },
       note: () => undefined
-    } as unknown as AgentContext<TTools>;
+    } as unknown as AgentContext<TTools, TRequest, TResponse, TStreamChunk>;
   }
 
-  private replayModel(): WrappedModel {
+  private replayModel(): WrappedModel<TRequest, TResponse, TStreamChunk> {
     return {
-      create: <T = unknown>(req: unknown, opts?: { site?: string }) => this.replayModelCreate(req, opts?.site) as Promise<T>,
-      stream: <T = unknown>(req: unknown, opts?: { site?: string }) => this.replayModelStream(req, opts?.site) as AsyncIterable<T>
+      create: <T = TResponse>(req: TRequest, opts?: { site?: string }) => this.replayModelCreate(req, opts?.site) as Promise<T>,
+      stream: <T = TStreamChunk>(req: TRequest, opts?: { site?: string }) => this.replayModelStream(req, opts?.site) as AsyncIterable<T>
     };
   }
 
@@ -173,7 +201,7 @@ export class ReplaySession<TTools extends ToolHandlers = UntypedToolHandlers> im
     ) as WrappedTools<TReplayTools>;
   }
 
-  private replayModelCreate(rawRequest: unknown, site: string | undefined): Promise<unknown> {
+  private replayModelCreate(rawRequest: TRequest, site: string | undefined): Promise<unknown> {
     const codec = this.requireCodec("model calls");
     const boundary = this.beginReplayBoundary("model_call", site);
     const normalized = codec.normalizeRequest(rawRequest);
@@ -198,7 +226,7 @@ export class ReplaySession<TTools extends ToolHandlers = UntypedToolHandlers> im
     });
   }
 
-  private replayModelStream(rawRequest: unknown, site: string | undefined): AsyncIterable<unknown> {
+  private replayModelStream(rawRequest: TRequest, site: string | undefined): AsyncIterable<unknown> {
     const codec = this.requireCodec("model streams");
     const boundary = this.beginReplayBoundary("model_call", site);
     const normalized = codec.normalizeRequest(rawRequest);
@@ -355,13 +383,16 @@ export class ReplaySession<TTools extends ToolHandlers = UntypedToolHandlers> im
     }));
   }
 
-  private replayEntropy(source: EntropyEvent["source"]): number | string {
-    const boundary = this.beginReplayBoundary("entropy", source);
+  private replayEntropy(source: Exclude<EntropyEvent["source"], "env">): number | string;
+  private replayEntropy(source: "env", key: string): string | null;
+  private replayEntropy(source: EntropyEvent["source"], key?: string): number | string | null {
+    const explicit = source === "env" && key ? `env:${key}` : source;
+    const boundary = this.beginReplayBoundary("entropy", explicit);
     try {
       const policy = this.opts.driftPolicy ?? "strict";
       try {
         const expectedStep = this.nextUnconsumedBoundaryStep();
-        const event = this.entropy.nextEvent(source, boundary.lane, policy);
+        const event = this.entropy.nextEvent(source, boundary.lane, policy, key);
         this.assertBoundaryOrder(event, expectedStep);
         return event.value;
       } catch (error) {
@@ -374,22 +405,24 @@ export class ReplaySession<TTools extends ToolHandlers = UntypedToolHandlers> im
                 kind: "entropy",
                 callSite: boundary.callSite,
                 lane: boundary.lane,
-                source
+                source,
+                ...(key ? { key } : {})
               },
-              source
+              source,
+              ...(key ? { key } : {})
             });
           }
           throw error;
         }
         this.passthroughDiverged = true;
-        return this.liveEntropy(source);
+        return source === "env" ? (process.env[key ?? ""] ?? null) : this.liveEntropy(source);
       }
     } finally {
       boundary.finish();
     }
   }
 
-  private liveEntropy(source: EntropyEvent["source"]): number | string {
+  private liveEntropy(source: Exclude<EntropyEvent["source"], "env">): number | string {
     if (source === "clock") {
       return this.runtime.now();
     }

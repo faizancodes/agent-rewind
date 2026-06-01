@@ -79,20 +79,17 @@ const model = new OpenAI({
 });
 ```
 
-Then use `openaiChatCodec()` in both record and replay:
+For normal app code, use a provider preset so the client and codec stay bound:
 
 ```ts
-import { AgentRewind, assertProviderClient, openaiChatCodec } from "@agentrewind/sdk";
+import { createOpenAICompatibleRewind } from "@agentrewind/sdk";
 
-const codec = openaiChatCodec();
-assertProviderClient(model, codec);
-
-const session = AgentRewind.record({
-  id: "compatible-demo",
-  store: ".rewind",
-  model,
-  codec
+const rewind = createOpenAICompatibleRewind({
+  apiKey: process.env.COMPATIBLE_API_KEY,
+  baseURL: "https://your-provider.example/v1",
+  store: ".rewind"
 });
+const session = rewind.record({ id: "compatible-demo" });
 ```
 
 The codec targets Chat Completions. If a provider only exposes a raw HTTP API,
@@ -106,29 +103,16 @@ method shape, but the OpenRouter codec gives recordings a distinct provider
 name and provides OpenRouter defaults:
 
 ```ts
-import {
-  AgentRewind,
-  OpenAI,
-  assertProviderClient,
-  openRouterChatCodec,
-  openRouterClientOptions
-} from "@agentrewind/sdk";
+import { createOpenRouterRewind } from "@agentrewind/sdk";
 
-const model = new OpenAI(
-  openRouterClientOptions({
-    apiKey: process.env.OPENROUTER_API_KEY,
-    appUrl: "https://your-app.example",
-    appTitle: "Your Agent"
-  })
-);
-const codec = openRouterChatCodec();
-assertProviderClient(model, codec);
-
-const session = AgentRewind.record({
+const rewind = createOpenRouterRewind({
+  apiKey: process.env.OPENROUTER_API_KEY,
+  appUrl: "https://your-app.example",
+  appTitle: "Your Agent",
+  store: ".rewind"
+});
+const session = rewind.record({
   id: "openrouter-demo",
-  store: ".rewind",
-  model,
-  codec
 });
 ```
 
@@ -141,19 +125,14 @@ back on fork/passthrough live calls.
 Use `anthropicCodec()` with an Anthropic SDK client:
 
 ```ts
-import { AgentRewind, Anthropic, anthropicCodec, assertProviderClient } from "@agentrewind/sdk";
+import { createAnthropicRewind } from "@agentrewind/sdk";
 
-const model = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY
+const rewind = createAnthropicRewind({
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  store: ".rewind"
 });
-const codec = anthropicCodec();
-assertProviderClient(model, codec);
-
-const session = AgentRewind.record({
+const session = rewind.record({
   id: "anthropic-demo",
-  store: ".rewind",
-  model,
-  codec
 });
 ```
 
@@ -164,14 +143,20 @@ with `ctx.model.stream()`.
 ## Custom Codec Contract
 
 Implement `ProviderCodec` when your model client does not match a built-in
-codec. During setup, call `assertProviderCodec(codec)` before recording if the
-codec is assembled dynamically or lives in your application code:
+codec. During setup, call `assertProviderCodec(codec)` for shape checks and
+`assertCodecConformance(codec, fixtures)` for normalize/denormalize/stream
+fixture checks:
 
 ```ts
-import { assertProviderCodec } from "@agentrewind/sdk";
+import { assertCodecConformance, assertProviderCodec } from "@agentrewind/sdk";
 
 const codec = myProviderCodec();
 assertProviderCodec(codec);
+await assertCodecConformance(codec, {
+  request: providerRequestFixture,
+  response: providerResponseFixture,
+  streamChunks: providerStreamChunkFixtures
+});
 ```
 
 Minimal custom codec shape:

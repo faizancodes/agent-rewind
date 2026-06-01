@@ -17,18 +17,16 @@ continuing.
 npm install @agentrewind/sdk
 ```
 
+This installs the SDK, CLI, built-in provider codecs, OpenAI client, Anthropic client, and replay test helpers. AgentRewind is ESM-only and requires Node 20 or newer.
+
 ## Skill for Coding Agents
 
 If you use coding agents such as Claude Code, Codex, or Cursor, we highly
-recommend adding the AI SDK skill to your repository:
+recommend adding the AgentRewind skill to your repository:
 
 ```sh
 npx skills add faizancodes/agent-rewind
 ```
-
-This installs the SDK, CLI, built-in provider codecs, OpenAI client, Anthropic
-client, and replay test helpers. AgentRewind is ESM-only and requires Node 20
-or newer.
 
 ## Start Here
 
@@ -56,7 +54,7 @@ agentrewind quickstart openai --out agentrewind-openai.ts
 
 | Package | Use it for |
 | --- | --- |
-| `@agentrewind/sdk` | Umbrella package for normal app use. It installs and re-exports the runtime, CLI, built-in provider codecs, OpenAI and Anthropic clients, and replay test helpers. |
+| `@agentrewind/sdk` | Umbrella package for normal app use. It installs the runtime, CLI, built-in provider codecs, OpenAI and Anthropic clients, and replay test helpers. |
 | `@agentrewind/core` | Dependency-free runtime for record, replay, fork, session storage, redaction, and inspection helpers. |
 | `@agentrewind/codec-openai` | OpenAI-compatible Chat Completions clients using `chat.completions.create()` and `chat.completions.stream()`. |
 | `@agentrewind/codec-openrouter` | First-class OpenRouter Chat Completions support using the OpenAI SDK with OpenRouter defaults and attribution headers. |
@@ -80,7 +78,7 @@ Inside the harness, use:
 - `ctx.model.create(request, { site })` for non-streaming model calls.
 - `ctx.model.stream(request, { site })` for streaming model calls.
 - `ctx.tools.toolName(args)` for tool calls.
-- `ctx.clock()`, `ctx.random()`, and `ctx.uuid()` instead of ambient globals.
+- `ctx.clock()`, `ctx.random()`, `ctx.uuid()`, and `ctx.env(key)` instead of ambient globals.
 - `ctx.note(text)` for audit notes.
 
 The `site` string is optional but strongly recommended. It gives a stable name
@@ -90,6 +88,10 @@ disambiguate repeated requests.
 Use `defineHarness()` when you want TypeScript to infer the harness return type
 and, for tool-using agents, the exact `ctx.tools` names and argument/result
 types.
+
+Use `defineAgent({ tools, harness })` when an agent has tools. The returned
+object carries the same tools into `recordRun()` and `replayRun()`, so you do
+not have to pass the same tools object twice.
 
 Use `assertProviderClient(model, codec)` during setup to catch provider/client
 mismatches early. It verifies that the SDK client exposes the method path the
@@ -121,6 +123,23 @@ const replayed = await AgentRewind.replayRun(recorded.path, { codec }, harness);
 console.log(recorded.path, recorded.result, replayed);
 ```
 
+For provider setup, prefer a preset or `withProvider()` when you can:
+
+```ts
+import { AgentRewind, createOpenAICompatibleRewind, createOpenAIRewind, defineHarness } from "@agentrewind/sdk";
+
+const rewind = createOpenAIRewind({ store: ".rewind" });
+const harness = defineHarness(async (ctx) => {
+  return ctx.model.create({
+    model: process.env.OPENAI_MODEL ?? "gpt-5.5",
+    messages: [{ role: "user", content: "hello" }]
+  });
+});
+
+const recorded = await rewind.recordRun({ id: "openai-demo" }, harness);
+const replayed = await rewind.replayRun(recorded.path, harness);
+```
+
 Use `AgentRewind.record()` directly when you need lower-level control, such as
 wrapping model clients manually, adding notes between runs, or packing from the
 session object. Use `AgentRewind.replay()` directly when you need inspection
@@ -134,16 +153,11 @@ Use this path for OpenAI and providers that work through the OpenAI Node SDK
 with a custom `baseURL`.
 
 ```ts
-import { AgentRewind, OpenAI, assertProviderClient, defineHarness, openaiChatCodec } from "@agentrewind/sdk";
+import { createOpenAIRewind, defineHarness } from "@agentrewind/sdk";
 import type { ChatCompletion, ChatCompletionChunk } from "@agentrewind/sdk";
 
-const model = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
 const chatModel = process.env.OPENAI_MODEL ?? "gpt-5.5";
-
-const codec = openaiChatCodec();
-assertProviderClient(model, codec);
+const rewind = createOpenAIRewind({ store: ".rewind" });
 
 const harness = defineHarness(async (ctx) => {
   const response = await ctx.model.create<ChatCompletion>(
@@ -161,17 +175,9 @@ const harness = defineHarness(async (ctx) => {
   return response.choices[0]?.message.content ?? "";
 });
 
-const recorded = await AgentRewind.recordRun(
-  {
-    id: "openai-demo",
-    store: ".rewind",
-    model,
-    codec
-  },
-  harness
-);
+const recorded = await rewind.recordRun({ id: "openai-demo" }, harness);
 
-const replayedAnswer = await AgentRewind.replayRun(recorded.path, { codec }, harness);
+const replayedAnswer = await rewind.replayRun(recorded.path, harness);
 ```
 
 After a session exists, replay APIs can resolve common selectors too:
@@ -198,7 +204,7 @@ await AgentRewind.pack("latest", "latest-session.rewind", { store: ".rewind" });
 
 const replayedLatest = await AgentRewind.replayRun(
   "latest",
-  { store: ".rewind", codec },
+  { store: ".rewind", codec: rewind.codec },
   harness
 );
 ```
@@ -206,8 +212,7 @@ const replayedLatest = await AgentRewind.replayRun(
 For an OpenAI-compatible provider:
 
 ```ts
-const model = new OpenAI({
-  apiKey: process.env.COMPATIBLE_API_KEY,
+const rewind = createOpenAICompatibleRewind({
   baseURL: "https://your-provider.example/v1"
 });
 ```
@@ -215,9 +220,9 @@ const model = new OpenAI({
 Streaming uses the OpenAI SDK chat completion stream helper:
 
 ```ts
-assertProviderClient(model, codec, ["stream"]);
+const streamSession = rewind.record({ id: "stream-demo" });
 
-await session.run(async (ctx) => {
+await streamSession.run(async (ctx) => {
   for await (const chunk of ctx.model.stream<ChatCompletionChunk>(
     {
       model: chatModel,
@@ -228,6 +233,7 @@ await session.run(async (ctx) => {
     process.stdout.write(chunk.choices[0]?.delta?.content ?? "");
   }
 });
+await streamSession.close();
 ```
 
 The OpenAI codec expects the client to expose
@@ -376,10 +382,11 @@ await AgentRewind.recordRun(
 );
 ```
 
-`defineHarness(tools, ...)` is a no-op at runtime. It keeps TypeScript aware of
-which tools exist and what each tool accepts/returns, so engineers do not have
-to write `Harness<Result, typeof tools>` by hand. Tool arguments and results
-must be JSON-serializable unless you provide a tool serializer.
+`defineHarness(tools, ...)` keeps TypeScript aware of which tools exist and what
+each tool accepts/returns, so engineers do not have to write
+`Harness<Result, typeof tools>` by hand. `defineAgent({ tools, harness })` keeps
+those tools attached at runtime too. Tool arguments and results must be
+JSON-serializable unless you provide a tool serializer.
 
 JSON-serializable means `null`, strings, finite numbers, booleans, arrays, and
 plain objects. Convert `Date`, `Map`, class instances, `Buffer`, `BigInt`,
@@ -387,11 +394,11 @@ plain objects. Convert `Date`, `Map`, class instances, `Buffer`, `BigInt`,
 those values at runtime, pass `toolSerializers` with `serialize()` and
 `deserialize()` functions for that tool.
 
-Use the same `tools` object in `defineHarness(tools, harness)` and
-`AgentRewind.record()` or `AgentRewind.recordRun()`. If a harness calls
-`ctx.tools.someTool()` during recording and that handler was not configured,
-AgentRewind throws a `ConfigurationError` that lists the configured tools and
-the missing tool name.
+If you do not use `defineAgent()`, pass the same `tools` object to
+`defineHarness(tools, harness)` and `AgentRewind.record()` or
+`AgentRewind.recordRun()`. If a harness calls `ctx.tools.someTool()` during
+recording and that handler was not configured, AgentRewind throws a
+`ConfigurationError` that lists the configured tools and the missing tool name.
 
 ## Typing Model Responses
 
@@ -522,9 +529,10 @@ agentrewind doctor .rewind/openai-demo
 agentrewind doctor openai-demo --store .rewind
 agentrewind doctor latest --store .rewind
 agentrewind inspect .rewind/openai-demo
+agentrewind timeline .rewind/openai-demo --kind model_call --site answer-question
 agentrewind inspect .rewind/openai-demo --json
 agentrewind context .rewind/openai-demo
-agentrewind context .rewind/openai-demo --site answer-question
+agentrewind prompt .rewind/openai-demo --site answer-question
 agentrewind fork .rewind/openai-demo --site answer-question --system "Prefer policy-backed answers."
 agentrewind entropy .rewind/openai-demo --source uuid
 agentrewind pack .rewind/openai-demo openai-demo.rewind
@@ -543,18 +551,21 @@ Single-session commands also accept easier selectors. Use a full session path,
 a session id with `--store .rewind`, `latest --store .rewind`, or the store
 directory itself when it contains exactly one session.
 
-`inspect` prints a labeled timeline table by default. Use `--json` when a test
-or script needs stable machine-readable fields, or `--no-header` when you want
-compact TSV output.
+`inspect` prints a labeled timeline table by default. `timeline` is an alias.
+Use `--kind`, `--site`, `--errors`, `--live`, `--from`, and `--to` to filter
+large sessions. Use `--json` when a test or script needs stable
+machine-readable fields, or `--no-header` when you want compact TSV output.
 
-`context` defaults to the first model call. `diff` defaults to the first two
+`context` defaults to the first model call and prints a readable prompt view.
+`prompt` is an alias. Add `--json` for the raw message array. `diff` defaults to the first two
 model calls. Use `--site`, `--from-site`, and `--to-site` when you know the
 stable site names from your harness. Use explicit step flags after `inspect`
 when a site appears more than once or you need an exact recorded step.
 
-`tool` prints recorded tool args, result, error, stream chunks, latency, and
-provenance as JSON. Use `--name` when the tool appears once, or `--step` after
-`inspect` when a tool appears multiple times.
+`tool` prints a readable tool-call view by default. Add `--json` for recorded
+args, result, error, stream chunks, latency, and provenance as JSON. Use
+`--name` when the tool appears once, or `--step` after `inspect` when a tool
+appears multiple times.
 
 `entropy` prints recorded `ctx.clock()`, `ctx.random()`, or `ctx.uuid()` values
 as JSON. Use `--source` when that source appears once, or `--step` after
@@ -666,7 +677,8 @@ Use the SDK test helpers to turn a recorded session into a replay regression
 test. The shortest form is one assertion:
 
 ```ts
-import { assertReplay, openaiChatCodec } from "@agentrewind/sdk";
+import { openaiChatCodec } from "@agentrewind/sdk";
+import { assertReplay } from "@agentrewind/sdk/testing";
 
 await assertReplay("latest", { store: ".rewind", codec: openaiChatCodec() }, async (ctx) => {
   await ctx.model.create(
@@ -682,7 +694,7 @@ await assertReplay("latest", { store: ".rewind", codec: openaiChatCodec() }, asy
 Use `fromSession()` when a test needs to inspect events before asserting:
 
 ```ts
-import { fromSession } from "@agentrewind/sdk";
+import { fromSession } from "@agentrewind/sdk/testing";
 
 const session = await fromSession("openai-demo", {
   store: ".rewind",

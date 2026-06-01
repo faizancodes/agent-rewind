@@ -15,7 +15,13 @@ export interface ForkOverrides {
 }
 
 /** Provider-specific adapter between SDK shapes and AgentRewind's normalized model-call format. */
-export interface ProviderCodec {
+export interface ProviderCodec<TRequest = unknown, TResponse = unknown, TStreamChunk = unknown> {
+  /** Compile-time-only carrier for provider request/response types. */
+  readonly __agentRewindTypes?: {
+    request: TRequest;
+    response: TResponse;
+    streamChunk: TStreamChunk;
+  };
   /** Stable provider name stored on model_call events. */
   name: string;
   /** SDK method paths to call, such as `messages.create` or `chat.completions.stream`. */
@@ -39,3 +45,7 @@ export interface ProviderCodec {
   /** Apply fork overrides to a normalized request before denormalizing it for a live call. */
   applyOverrides(req: NormalizedRequest, overrides: ForkOverrides, step: number): NormalizedRequest;
 }
+
+export type ProviderRequest<TCodec> = TCodec extends ProviderCodec<infer TRequest, unknown, unknown> ? TRequest : unknown;
+export type ProviderResponse<TCodec> = TCodec extends ProviderCodec<unknown, infer TResponse, unknown> ? TResponse : unknown;
+export type ProviderStreamChunk<TCodec> = TCodec extends ProviderCodec<unknown, unknown, infer TStreamChunk> ? TStreamChunk : unknown;

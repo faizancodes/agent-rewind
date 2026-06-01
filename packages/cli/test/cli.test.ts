@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { openaiChatCodec } from "@agentrewind/codec-openai";
-import { beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { AgentRewind, readSession, type NormalizedRequest, type NormalizedResponse, type ProviderCodec } from "@agentrewind/core";
 
 const execFileAsync = promisify(execFile);
@@ -47,10 +47,6 @@ const codec: ProviderCodec = {
 };
 
 describe("agentrewind CLI", () => {
-  beforeAll(async () => {
-    await execFileAsync("pnpm", ["build"]);
-  }, 30000);
-
   it("inspect/context/diff/pack produce expected output on a fixture session", async () => {
     const store = await mkdtemp(join(tmpdir(), "agentrewind-cli-"));
     const session = AgentRewind.record({
@@ -142,6 +138,22 @@ describe("agentrewind CLI", () => {
       ])
     );
 
+    const timelineAlias = await execFileAsync("node", [
+      cli,
+      "timeline",
+      sessionPath,
+      "--kind",
+      "model_call",
+      "--site",
+      "one",
+      "--json",
+      "--full-fingerprint"
+    ]);
+    const filteredTimeline = JSON.parse(timelineAlias.stdout);
+    expect(filteredTimeline).toHaveLength(1);
+    expect(filteredTimeline[0]).toMatchObject({ kind: "model_call", site: "one" });
+    expect(filteredTimeline[0].fingerprint.length).toBe(64);
+
     const inspectNoHeader = await execFileAsync("node", [cli, "inspect", sessionPath, "--no-header"]);
     expect(inspectNoHeader.stdout.split("\n")[0]).not.toContain("step\tkind");
 
@@ -158,7 +170,7 @@ describe("agentrewind CLI", () => {
     const entropyByStep = await execFileAsync("node", [cli, "entropy", "fixture", "--store", store, "--step", String(entropyStep)]);
     expect(JSON.parse(entropyByStep.stdout)).toMatchObject({ source: "uuid", value: expect.any(String) });
 
-    const tool = await execFileAsync("node", [cli, "tool", sessionPath, "--name", "lookupCustomer"]);
+    const tool = await execFileAsync("node", [cli, "tool", sessionPath, "--name", "lookupCustomer", "--json"]);
     expect(JSON.parse(tool.stdout)).toMatchObject({
       step: toolStep,
       name: "lookupCustomer",
@@ -166,19 +178,32 @@ describe("agentrewind CLI", () => {
       result: { id: "cus_123", plan: "enterprise" },
       error: false
     });
-    const toolByStep = await execFileAsync("node", [cli, "tool", "fixture", "--store", store, "--step", String(toolStep)]);
+    const toolByStep = await execFileAsync("node", [cli, "tool", "fixture", "--store", store, "--step", String(toolStep), "--json"]);
     expect(JSON.parse(toolByStep.stdout)).toMatchObject({ name: "lookupCustomer", args: { id: "cus_123" } });
+    const readableTool = await execFileAsync("node", [cli, "tool", sessionPath, "--name", "lookupCustomer"]);
+    expect(readableTool.stdout).toContain("Tool: lookupCustomer");
+    expect(readableTool.stdout).toContain("Args:");
+    expect(readableTool.stdout).toContain("Result:");
 
-    const context = await execFileAsync("node", [cli, "context", sessionPath, "--step", String(modelSteps[0])]);
+    const context = await execFileAsync("node", [cli, "context", sessionPath, "--step", String(modelSteps[0]), "--json"]);
     expect(JSON.parse(context.stdout)).toEqual(req("one").messages);
+    const readableContext = await execFileAsync("node", [cli, "context", sessionPath, "--step", String(modelSteps[0])]);
+    expect(readableContext.stdout).toContain("1. user");
+    expect(readableContext.stdout).toContain("one");
+    const promptAlias = await execFileAsync("node", [cli, "prompt", sessionPath, "--step", String(modelSteps[0]), "--json"]);
+    expect(JSON.parse(promptAlias.stdout)).toEqual(req("one").messages);
+    const invalidStep = await execFileAsync("node", [cli, "context", sessionPath, "--step", "1x"]).catch(
+      (caught) => caught as { stderr: string }
+    );
+    expect(invalidStep.stderr).toContain("Expected a non-negative integer");
 
-    const defaultContext = await execFileAsync("node", [cli, "context", sessionPath]);
+    const defaultContext = await execFileAsync("node", [cli, "context", sessionPath, "--json"]);
     expect(JSON.parse(defaultContext.stdout)).toEqual(req("one").messages);
 
-    const siteContext = await execFileAsync("node", [cli, "context", sessionPath, "--site", "two"]);
+    const siteContext = await execFileAsync("node", [cli, "context", sessionPath, "--site", "two", "--json"]);
     expect(JSON.parse(siteContext.stdout)).toEqual(req("two").messages);
 
-    const latestContext = await execFileAsync("node", [cli, "context", "latest", "--store", store, "--site", "two"]);
+    const latestContext = await execFileAsync("node", [cli, "context", "latest", "--store", store, "--site", "two", "--json"]);
     expect(JSON.parse(latestContext.stdout)).toEqual(req("two").messages);
 
     const diff = await execFileAsync("node", [cli, "diff", sessionPath, "--from", String(modelSteps[0]), "--to", String(modelSteps[1])]);
@@ -257,7 +282,7 @@ describe("agentrewind CLI", () => {
     });
     await session.close();
 
-    const output = await execFileAsync("node", [cli, "tool", join(store, "tool-error"), "--name", "fail"]);
+    const output = await execFileAsync("node", [cli, "tool", join(store, "tool-error"), "--name", "fail", "--json"]);
     expect(JSON.parse(output.stdout)).toMatchObject({
       name: "fail",
       args: { id: "t1" },
@@ -332,6 +357,7 @@ describe("agentrewind CLI", () => {
       );
       expect(dryRun.stdout).toContain("AgentRewind fork plan.");
       expect(dryRun.stdout).toContain("Fork point: step");
+      expect(dryRun.stdout).toContain("did not check provider credentials");
       expect(requests).toHaveLength(0);
 
       const fork = await execFileAsync(
@@ -402,17 +428,17 @@ describe("agentrewind CLI", () => {
 
     const openrouter = await execFileAsync("node", [cli, "quickstart", "openrouter", "--manager", "npm"]);
     expect(openrouter.stdout).toContain("npm install @agentrewind/sdk");
-    expect(openrouter.stdout).toContain("import { OpenAI, openRouterChatCodec, openRouterClientOptions } from \"@agentrewind/sdk\";");
-    expect(openrouter.stdout).toContain("openRouterClientOptions");
+    expect(openrouter.stdout).toContain("import { createOpenRouterRewind } from \"@agentrewind/sdk\";");
+    expect(openrouter.stdout).toContain("createOpenRouterRewind");
     expect(openrouter.stdout).toContain("requiredEnv(\"OPENROUTER_API_KEY\")");
     expect(openrouter.stdout).toContain("requiredEnv(\"OPENROUTER_MODEL\")");
     expect(openrouter.stdout).toContain("Missing ${name}. Set it before running this starter.");
-    expect(openrouter.stdout).toContain("assertProviderClient(model, codec)");
+    expect(openrouter.stdout).toContain("Provider presets create the SDK client");
     expect(openrouter.stdout).toContain("const sessionPath = `.rewind/${sessionId}`;");
     expect(openrouter.stdout).toContain("console.error(explainRewindError(error, { sessionPath }));");
     expect(openrouter.stdout).toContain("defineHarness");
-    expect(openrouter.stdout).toContain("AgentRewind.recordRun");
-    expect(openrouter.stdout).toContain("AgentRewind.replayRun");
+    expect(openrouter.stdout).toContain("rewind.recordRun");
+    expect(openrouter.stdout).toContain("rewind.replayRun");
     expect(openrouter.stdout).toContain("What This Starter Does");
     expect(openrouter.stdout).toContain("A stable site name makes drift output");
     expect(openrouter.stdout).toContain("agentrewind list .rewind");
@@ -422,15 +448,15 @@ describe("agentrewind CLI", () => {
 
     const anthropic = await execFileAsync("node", [cli, "quickstart", "anthropic"]);
     expect(anthropic.stdout).toContain("npm install @agentrewind/sdk");
-    expect(anthropic.stdout).toContain("import { Anthropic, anthropicCodec } from \"@agentrewind/sdk\";");
+    expect(anthropic.stdout).toContain("import { createAnthropicRewind } from \"@agentrewind/sdk\";");
     expect(anthropic.stdout).toContain("ANTHROPIC_MODEL=...");
-    expect(anthropic.stdout).toContain("anthropicCodec");
+    expect(anthropic.stdout).toContain("createAnthropicRewind");
     expect(anthropic.stdout).toContain("explainRewindError");
 
     const openaiTs = await execFileAsync("node", [cli, "quickstart", "openai", "--format", "ts"]);
-    expect(openaiTs.stdout).toContain("import { AgentRewind");
+    expect(openaiTs.stdout).toContain("import { createOpenAIRewind");
     expect(openaiTs.stdout).toContain("from \"@agentrewind/sdk\"");
-    expect(openaiTs.stdout).toContain("openaiChatCodec");
+    expect(openaiTs.stdout).toContain("createOpenAIRewind");
     expect(openaiTs.stdout).not.toContain("```");
 
     const starter = join(store, "agentrewind-openai.ts");
@@ -443,9 +469,9 @@ describe("agentrewind CLI", () => {
     expect(starterSource).toContain("const sessionId = \"openai-demo\";");
     expect(starterSource).toContain("The harness is your replayable agent workflow.");
     expect(starterSource).toContain("A stable site name makes drift output");
-    expect(starterSource).toContain("assertProviderClient(model, codec);");
-    expect(starterSource).toContain("AgentRewind.recordRun");
-    expect(starterSource).toContain("AgentRewind.replayRun");
+    expect(starterSource).toContain("Provider presets create the SDK client");
+    expect(starterSource).toContain("rewind.recordRun");
+    expect(starterSource).toContain("rewind.replayRun");
     expect(starterSource).toContain("explainRewindError(error, { sessionPath })");
     expect(starterSource).not.toContain("```");
 

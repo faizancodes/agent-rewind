@@ -21,17 +21,22 @@ import { deserializeToolValue, serializeToolValue } from "./tool-serialization.j
 import { DriftError, RewindError } from "./errors.js";
 import { usageAdd } from "./tokens.js";
 
-export interface ForkOptions<TTools extends ToolHandlers = UntypedToolHandlers> {
+export interface ForkOptions<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> {
   /** Boundary step where live tail execution begins. */
   atStep: number;
   /** Harness to execute for this fork. Defaults to the last harness passed to `replay.run()`, then to a stored-event tail walk. */
-  harness?: Harness<unknown, TTools>;
+  harness?: Harness<unknown, TTools, TRequest, TResponse, TStreamChunk>;
   /** Live model client for tail model calls. Falls back to replay options when present. */
   model?: unknown;
   /** Prompt/model/request changes for live tail model calls. */
   overrides?: ForkOverrides;
   /** Tool handling policy for tail calls. Defaults to serving recorded hits and erroring on misses. */
-  tools?: { onMatch?: "serve-recorded" | "live"; onMiss?: "error" | "stub" | "simulate" | "live" };
+  tools?: { onMatch?: "serve-recorded"; onMiss?: "error" | "stub" };
   /** Optional success predicate evaluated against the resulting trace. */
   goal?: (trace: Trace) => boolean;
   /** Reserved gate for future live/sandboxed tool policies. */
@@ -95,13 +100,18 @@ class ForkDiverged extends Error {
   }
 }
 
-export async function forkReplay<TTools extends ToolHandlers = UntypedToolHandlers>(
-  replay: ReplaySession<TTools>,
-  opts: ForkOptions<TTools>
+export async function forkReplay<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+>(
+  replay: ReplaySession<TTools, TRequest, TResponse, TStreamChunk>,
+  opts: ForkOptions<TTools, TRequest, TResponse, TStreamChunk>
 ): Promise<ForkResult> {
   const codec = replay.requireCodec("fork");
   const liveModel = opts.model ?? replay.opts.model;
-  const child = new RecordSession<TTools>({
+  const child = new RecordSession<TTools, TRequest, TResponse, TStreamChunk>({
     id: undefined,
     store: dirname(replay.stored.path),
     model: liveModel,
@@ -173,35 +183,47 @@ export async function forkReplay<TTools extends ToolHandlers = UntypedToolHandle
   };
 }
 
-interface ForkContextState<TTools extends ToolHandlers = UntypedToolHandlers> {
-  replay: ReplaySession<TTools>;
-  opts: ForkOptions<TTools>;
-  child: RecordSession<TTools>;
+interface ForkContextState<
+  TTools extends ToolHandlers = UntypedToolHandlers,
+  TRequest = unknown,
+  TResponse = unknown,
+  TStreamChunk = unknown
+> {
+  replay: ReplaySession<TTools, TRequest, TResponse, TStreamChunk>;
+  opts: ForkOptions<TTools, TRequest, TResponse, TStreamChunk>;
+  child: RecordSession<TTools, TRequest, TResponse, TStreamChunk>;
   matcher: PendingStore;
   entropy: EntropyReplay;
   redactor: Redactor;
   lanes: LaneManager;
   traceEvents: RewindEvent[];
   liveModel: unknown;
-  codec: ProviderCodec;
+  codec: ProviderCodec<TRequest, TResponse, TStreamChunk>;
   addUsage(usage: Usage | undefined): void;
 }
 
-function forkContext<TTools extends ToolHandlers>(state: ForkContextState<TTools>): AgentContext<TTools> {
+function forkContext<TTools extends ToolHandlers, TRequest, TResponse, TStreamChunk>(
+  state: ForkContextState<TTools, TRequest, TResponse, TStreamChunk>
+): AgentContext<TTools, TRequest, TResponse, TStreamChunk> {
   return {
     model: forkModel(state),
     tools: forkTools(state),
     clock: () => forkEntropy(state, "clock") as number,
     random: () => forkEntropy(state, "random") as number,
     uuid: () => forkEntropy(state, "uuid") as string,
-    env: (key) => process.env[key],
+    env: (key) => {
+      const value = forkEntropy(state, "env", key);
+      return value === null ? undefined : String(value);
+    },
     note: (text) => state.child.note(text)
-  } as AgentContext<TTools>;
+  } as AgentContext<TTools, TRequest, TResponse, TStreamChunk>;
 }
 
-function forkModel<TTools extends ToolHandlers>(state: ForkContextState<TTools>): WrappedModel {
+function forkModel<TTools extends ToolHandlers, TRequest, TResponse, TStreamChunk>(
+  state: ForkContextState<TTools, TRequest, TResponse, TStreamChunk>
+): WrappedModel<TRequest, TResponse, TStreamChunk> {
   return {
-    create: async <T = unknown>(rawRequest: unknown, callOpts?: { site?: string }) => {
+    create: async <T = TResponse>(rawRequest: TRequest, callOpts?: { site?: string }) => {
       const normalized = state.codec.normalizeRequest(rawRequest);
       const requestHash = fingerprint(normalized, state.codec, state.redactor, state.replay.stored.meta.fingerprintMode);
       const lane = state.lanes.beginBoundaryLane(callOpts?.site ? `model_call\u0000${callOpts.site}` : undefined);
@@ -229,7 +251,7 @@ function forkModel<TTools extends ToolHandlers>(state: ForkContextState<TTools>)
         }
         const step = "hit" in resolution ? resolution.hit.step : state.opts.atStep;
         const overridden = state.codec.applyOverrides(normalized, state.opts.overrides ?? {}, step);
-        const raw = state.codec.denormalizeRequest(overridden);
+        const raw = state.codec.denormalizeRequest(overridden) as TRequest;
         const before = state.child.events().length;
         const live = await state.child.recordLiveModel(raw, state.liveModel, callOpts?.site, "live");
         const recorded = state.child.events().slice(before).filter((event): event is ModelCallEvent => event.kind === "model_call").at(-1);
@@ -239,7 +261,7 @@ function forkModel<TTools extends ToolHandlers>(state: ForkContextState<TTools>)
         state.lanes.endBoundaryLane(lane);
       }
     },
-    stream: <T = unknown>(rawRequest: unknown, callOpts?: { site?: string }) => {
+    stream: <T = TStreamChunk>(rawRequest: TRequest, callOpts?: { site?: string }) => {
       const normalized = state.codec.normalizeRequest(rawRequest);
       const requestHash = fingerprint(normalized, state.codec, state.redactor, state.replay.stored.meta.fingerprintMode);
       const lane = state.lanes.beginBoundaryLane(callOpts?.site ? `model_call\u0000${callOpts.site}` : undefined);
@@ -268,7 +290,7 @@ function forkModel<TTools extends ToolHandlers>(state: ForkContextState<TTools>)
         }
         const step = "hit" in resolution ? resolution.hit.step : state.opts.atStep;
         const overridden = state.codec.applyOverrides(normalized, state.opts.overrides ?? {}, step);
-        const raw = state.codec.denormalizeRequest(overridden);
+        const raw = state.codec.denormalizeRequest(overridden) as TRequest;
         const before = state.child.events().length;
         return finalizeStream(state.child.recordLiveModelStream(raw, state.liveModel, callOpts?.site, "live"), () => {
           const recorded = state.child.events().slice(before).filter((event): event is ModelCallEvent => event.kind === "model_call").at(-1);
@@ -336,9 +358,7 @@ function forkToolCall<TTools extends ToolHandlers>(
       }
 
       const policy = state.opts.tools?.onMatch ?? "serve-recorded";
-      if (policy === "live") {
-        throw new RewindError("Fork onMatch='live' is not implemented in the MVP", { name });
-      }
+      void policy;
       if (event.error) {
         const restoredError = state.redactor.vault.restore(event.error);
         state.child.recordServedToolError(name, args, argsHash, event.error, "recorded");
@@ -368,9 +388,6 @@ function forkToolCall<TTools extends ToolHandlers>(
       state.child.recordStubTool(name, args, result, argsHash);
       return Promise.resolve(result).finally(() => state.lanes.endBoundaryLane(lane));
     }
-    if (onMiss === "simulate" || onMiss === "live") {
-      throw new RewindError(`Fork onMiss='${onMiss}' is not implemented in the MVP`, { name });
-    }
     throw new ForkDiverged(state.opts.atStep);
   } catch (error) {
     state.lanes.endBoundaryLane(lane);
@@ -378,21 +395,31 @@ function forkToolCall<TTools extends ToolHandlers>(
   }
 }
 
-function forkEntropy<TTools extends ToolHandlers>(state: ForkContextState<TTools>, source: "clock" | "random" | "uuid"): number | string {
-  const lane = state.lanes.beginBoundaryLane(`entropy\u0000${source}`);
+function forkEntropy<TTools extends ToolHandlers>(state: ForkContextState<TTools>, source: "clock" | "random" | "uuid"): number | string;
+function forkEntropy<TTools extends ToolHandlers>(state: ForkContextState<TTools>, source: "env", key: string): string | null;
+function forkEntropy<TTools extends ToolHandlers>(
+  state: ForkContextState<TTools>,
+  source: "clock" | "random" | "uuid" | "env",
+  key?: string
+): number | string | null {
+  const explicit = source === "env" && key ? `env:${key}` : source;
+  const lane = state.lanes.beginBoundaryLane(`entropy\u0000${explicit}`);
   try {
     const expectedStep = nextUnconsumedBoundaryStep(state);
-    const recorded = state.entropy.peek(source, lane);
+    const recorded = state.entropy.peek(source, lane, key);
     if (recorded && recorded.step < state.opts.atStep) {
       if (expectedStep !== undefined && expectedStep < recorded.step && expectedStep < state.opts.atStep) {
         throw new ForkDiverged(expectedStep);
       }
-      const event = state.entropy.nextEvent(source, lane, "strict");
+      const event = state.entropy.nextEvent(source, lane, "strict", key);
       state.traceEvents.push(markProvenance(event, "recorded"));
       return event.value;
     }
     if (expectedStep !== undefined && expectedStep < state.opts.atStep) {
       throw new ForkDiverged(expectedStep);
+    }
+    if (source === "env") {
+      return state.child.recordEnv(key ?? "", process.env[key ?? ""], "live") ?? null;
     }
     return state.child.recordLiveEntropy(source, "live");
   } finally {
@@ -435,7 +462,11 @@ async function forkFromStoredEvents<TTools extends ToolHandlers>(state: ForkCont
       continue;
     }
     if (event.kind === "entropy") {
-      state.child.recordLiveEntropy(event.source, "live");
+      if (event.source === "env") {
+        state.child.recordEnv(event.key ?? "", process.env[event.key ?? ""], "live");
+      } else {
+        state.child.recordLiveEntropy(event.source, "live");
+      }
       continue;
     }
     if (event.kind === "note") {
@@ -463,9 +494,7 @@ async function forkStoredModelEvent<TTools extends ToolHandlers>(state: ForkCont
 
 async function forkStoredToolEvent<TTools extends ToolHandlers>(state: ForkContextState<TTools>, event: ToolCallEvent): Promise<void> {
   const policy = state.opts.tools?.onMatch ?? "serve-recorded";
-  if (policy === "live") {
-    throw new RewindError("Fork onMatch='live' is not implemented in the MVP", { name: event.name });
-  }
+  void policy;
   const args = deserializeToolValue(
     state.replay.opts.toolSerializers,
     event.name,

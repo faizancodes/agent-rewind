@@ -41,7 +41,7 @@ interface ToolCallAccumulator {
   };
 }
 
-export function openAIChatCodec(): ProviderCodec {
+export function openAIChatCodec(): ProviderCodec<ChatCompletionCreateParamsBase, ChatCompletion, ChatCompletionChunk> {
   return {
     name: "openai-chat",
     interceptPoints: ["chat.completions.create", "chat.completions.stream"],
@@ -84,7 +84,7 @@ function denormalizeRequest(req: NormalizedRequest): unknown {
     ...req.params,
     model: req.model,
     messages
-  } satisfies Partial<ChatCompletionCreateParamsBase>;
+  } as ChatCompletionCreateParamsBase;
 }
 
 function normalizeResponse(raw: unknown): NormalizedResponse {
@@ -106,9 +106,9 @@ function normalizeStream(rawChunks: unknown[]): { final: NormalizedResponse; chu
   };
 }
 
-async function* rebuildStream(chunks: ChunkRecord[]): AsyncIterable<unknown> {
+async function* rebuildStream(chunks: ChunkRecord[]): AsyncIterable<ChatCompletionChunk> {
   for (const chunk of chunks) {
-    yield chunk.data;
+    yield chunk.data as ChatCompletionChunk;
   }
 }
 

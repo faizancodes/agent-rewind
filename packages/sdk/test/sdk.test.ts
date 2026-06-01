@@ -5,16 +5,16 @@ import {
   OpenAI,
   anthropicCodec,
   assertProviderClient,
-  assertReplay,
   openRouterChatCodec,
   openRouterClientOptions,
   openaiChatCodec,
   type AnthropicMessage,
   type ChatCompletion
 } from "@agentrewind/sdk";
+import { assertReplay } from "@agentrewind/sdk/testing";
 
 describe("@agentrewind/sdk", () => {
-  it("is the single application import surface for runtime, clients, codecs, and tests", () => {
+  it("keeps the root import focused while exposing tests through a subpath", () => {
     const openai = new OpenAI({ apiKey: "test-key" });
     const openrouter = new OpenAI(openRouterClientOptions({ apiKey: "test-key" }));
     const anthropic = new Anthropic({ apiKey: "test-key" });
