@@ -11,3 +11,4 @@ packages/*/.tmp-quickstart-*/
 !.env.example
 coverage/
 .DS_Store
+agentrewind-cli-gif/

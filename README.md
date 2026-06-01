@@ -9,10 +9,21 @@ the recorded boundary outputs and makes zero live model or tool calls. If the
 harness changes its trajectory, AgentRewind reports drift instead of silently
 continuing.
 
+![AgentRewind rewind, fork, and replay workflow](docs/assets/agentrewind-demo.gif)
+
 ## Install
 
 ```sh
 npm install @agentrewind/sdk
+```
+
+## Skill for Coding Agents
+
+If you use coding agents such as Claude Code, Codex, or Cursor, we highly
+recommend adding the AI SDK skill to your repository:
+
+```sh
+npx skills add faizancodes/agent-rewind
 ```
 
 This installs the SDK, CLI, built-in provider codecs, OpenAI client, Anthropic
