@@ -4,10 +4,13 @@ Use this reference when proving AgentRewind actually works in a target codebase.
 
 ## No-Key Fake Client Test
 
-Prefer this before live provider tests. Fake clients should match SDK method
-paths and count live calls:
+Prefer this before live provider tests. Fake clients should match the provider SDK method paths and count live calls:
 
 ```ts
+import assert from "node:assert/strict";
+import { AgentRewind, defineHarness, openaiChatCodec } from "@agentrewind/sdk";
+import type { ChatCompletion } from "@agentrewind/sdk";
+
 let liveCalls = 0;
 
 const model = {
@@ -34,10 +37,48 @@ const model = {
     }
   }
 };
+
+const rewind = AgentRewind.withProvider({
+  store: ".rewind-test",
+  model,
+  codec: openaiChatCodec()
+});
+
+const harness = defineHarness(async (ctx) => {
+  const response = await ctx.model.create<ChatCompletion>(
+    {
+      model: "test-model",
+      messages: [{ role: "user", content: `request ${ctx.uuid()}` }]
+    },
+    { site: "fake-model-call" }
+  );
+  return response.choices[0]?.message.content ?? "";
+});
+
+const recorded = await rewind.recordRun({ id: "fake-client" }, harness);
+assert.equal(await rewind.replayRun(recorded.path, harness), "ok");
+assert.equal(liveCalls, 1);
 ```
 
-Record, replay, then assert `liveCalls === 1`. If it is `2`, replay made a live
-call and the integration is wrong.
+If `liveCalls` is `2`, replay made a live provider call and the integration is wrong.
+
+## Tool Replay Test
+
+For agents with tools, count live handler calls:
+
+```ts
+import { defineTools } from "@agentrewind/sdk";
+
+let lookupCalls = 0;
+const tools = defineTools({
+  lookupCustomer: async (args: { customerId: string }) => {
+    lookupCalls += 1;
+    return { id: args.customerId, tier: "enterprise" };
+  }
+});
+```
+
+Record and replay the same `defineAgent({ tools, harness })`, then assert the tool call count did not increase during replay.
 
 ## Streaming Test
 
@@ -45,49 +86,61 @@ For streaming agents, fake `chat.completions.stream()` or `messages.stream()`:
 
 ```ts
 async function* asyncIterable(values: unknown[]) {
-  for (const value of values) yield value;
+  for (const value of values) {
+    yield value;
+  }
 }
 ```
 
-Record stream chunks, replay them, and assert the reconstructed user-visible
-text is identical.
+Record stream chunks, replay them, and assert the reconstructed user-visible text is identical.
+
+## Entropy And Env Test
+
+If prompts or branches use entropy, include the value in a recorded request and replay it:
+
+```ts
+const flag = ctx.env("SUPPORT_ROUTER_POLICY") ?? "default";
+const requestId = ctx.uuid();
+```
+
+Strict replay should use the recorded `ctx.env()` value, UUID, clock, and random draws, even if the live environment changes after recording.
 
 ## CLI Test
 
 Run against a real recorded session:
 
 ```sh
-agentrewind inspect .rewind/demo
-agentrewind inspect .rewind/demo --json
-agentrewind context .rewind/demo
-agentrewind context .rewind/demo --site decision-name
-agentrewind diff .rewind/demo
-agentrewind fork .rewind/demo --site decision-name --system "Try the corrected prompt." --dry-run
-agentrewind pack .rewind/demo demo.rewind
+agentrewind list .rewind
+agentrewind doctor latest --store .rewind
+agentrewind inspect latest --store .rewind
+agentrewind timeline latest --store .rewind --kind model_call
+agentrewind inspect latest --store .rewind --json
+agentrewind context latest --store .rewind --site decision-name
+agentrewind prompt latest --store .rewind --step 3
+agentrewind diff latest --store .rewind
+agentrewind tool latest --store .rewind --name lookupCustomer
+agentrewind tool latest --store .rewind --name lookupCustomer --json
+agentrewind entropy latest --store .rewind --source uuid
+agentrewind fork latest --store .rewind --site decision-name --system "Try the corrected prompt." --dry-run
+agentrewind pack latest demo.rewind --store .rewind
 agentrewind unpack demo.rewind unpacked-demo
 test ! -e unpacked-demo/vault.enc
 ```
 
-`context` defaults to the first model call and `diff` defaults to the first two
-model calls. Use `--site`, `--from-site`, and `--to-site` when testing named
-model calls. Use explicit model-call step numbers from `inspect` when a site is
-repeated or you need a specific prompt comparison. Entropy and tool calls may
-appear before model calls.
+Use `--site`, `--from-site`, and `--to-site` for named model calls. Use strict numeric step values from `inspect` when a site repeats. For fork dry runs, add `--check-provider` only when you want the command to validate provider credentials and client setup.
 
-For CLI fork smoke tests without spending real tokens, run `agentrewind fork`
-with `--dry-run` first. For deterministic CI, point `--provider
-openai-compatible --base-url <local-test-server>` at a local OpenAI-compatible
-test endpoint and use `--api-key-env` with a throwaway env var.
+For deterministic CI fork tests, point `--provider openai-compatible --base-url <local-test-server>` at a local OpenAI-compatible test endpoint and use `--api-key-env` with a throwaway env var.
 
 ## Live Smoke Env File
 
-Do not ask users to paste keys into chat. Ask them to create a local env file
-outside the repo:
+Do not ask users to paste keys into chat. Ask them to create a local env file outside the repo:
 
 ```sh
 cat > /tmp/agentrewind-smoke.env <<'EOF'
 OPENAI_API_KEY=...
+OPENAI_MODEL=...
 ANTHROPIC_API_KEY=...
+ANTHROPIC_MODEL=...
 OPENROUTER_API_KEY=...
 OPENROUTER_MODEL=openai/gpt-4o-mini
 EOF
@@ -105,55 +158,64 @@ COMPATIBLE_MODEL=provider/model
 EOF
 ```
 
-Source the file inside the command, sanitize all printed errors, and remove
-temporary `.rewind` stores after the smoke test.
+Source the file inside the smoke-test command, sanitize printed errors, and remove temporary `.rewind` stores after the test.
 
 ## Live Smoke Assertions
 
 For each provider smoke test:
 
-- `assertProviderClient(model, codec)` passes before recording.
-- Make exactly one live call during recording.
+- Provider setup succeeds before recording.
+- Exactly one live model call happens during recording.
 - Strict replay returns the same value.
-- Strict replay does not make another live call.
+- Strict replay does not make another live model call.
 - Usage is present when the provider returns it.
-- The response text prefix can be printed, but never print keys or full env.
+- Fork dry run succeeds for the recorded model-call step.
+- A live fork succeeds only when intentionally spending provider tokens.
+- The response prefix can be printed, but never print keys or full env.
 
 For OpenRouter first-class support, test both create and stream when possible:
 
 - `openRouterChatCodec().name === "openrouter-chat"`
 - `openRouterClientOptions().baseURL === "https://openrouter.ai/api/v1"`
-- live create records/replays
-- live stream records/replays
+- live create records and replays
+- live stream records and replays
+- fork tail calls preserve OpenRouter request parameters
 
 ## Workspace Verification
 
-When working in the AgentRewind repo itself, run:
+When working in the AgentRewind repo itself, run focused checks first:
 
 ```sh
 pnpm typecheck
-pnpm test
+pnpm test:unit
+pnpm test:cli
+pnpm test:providers
 pnpm build
 pnpm examples:run
-pnpm check
 ```
 
-If public exports or package metadata changed, also run release packaging checks:
+Before release-level claims, run:
 
 ```sh
-pnpm pack:packages
+pnpm check
+pnpm release:check
+pnpm package:smoke
 pnpm publish:dry-run
 ```
 
-For installed-package confidence, create a temporary consumer project and install
-local tarballs or the published packages:
+`pnpm check` already includes typecheck, tests, build, examples, and package smoke tests.
+
+## Installed Package Smoke Test
+
+For installed-package confidence, create a temporary consumer project and install local tarballs or the published package:
 
 ```sh
 tmp="$(mktemp -d /tmp/agentrewind-install.XXXXXX)"
 cd "$tmp"
 npm init -y
 npm install @agentrewind/sdk
-node --input-type=module -e 'import { AgentRewind, OpenAI, Anthropic, openaiChatCodec, openRouterChatCodec, anthropicCodec, assertReplay } from "@agentrewind/sdk"; console.log(typeof AgentRewind.recordRun, typeof OpenAI, typeof Anthropic, typeof openaiChatCodec, typeof openRouterChatCodec, typeof anthropicCodec, typeof assertReplay)'
+node --input-type=module -e 'import { AgentRewind, createOpenAIRewind, createOpenRouterRewind, createAnthropicRewind } from "@agentrewind/sdk"; console.log(typeof AgentRewind.recordRun, typeof createOpenAIRewind, typeof createOpenRouterRewind, typeof createAnthropicRewind)'
+npx agentrewind --version
 npx agentrewind --help
 ```
 
@@ -171,6 +233,13 @@ npm view @agentrewind/codec-openrouter version
 npm view @agentrewind/codec-anthropic version
 ```
 
-If publishing needs an npm token, keep it outside the repo, source it without
-printing it, and remove temporary npm config files after publishing. Never write
-npm tokens into tracked files or chat.
+If publishing needs an npm token, keep it outside the repo:
+
+```sh
+cat > /tmp/agentrewind-npm.env <<'EOF'
+NPM_TOKEN=...
+EOF
+chmod 600 /tmp/agentrewind-npm.env
+```
+
+Source the token without printing it, write temporary npm config outside the repo, and remove that temporary npm config after publishing. Never write npm tokens into tracked files or chat.

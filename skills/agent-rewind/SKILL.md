@@ -1,144 +1,152 @@
 ---
 name: agent-rewind
-description: Add, modify, debug, verify, or publish AgentRewind deterministic record/replay/fork support in TypeScript LLM-agent codebases. Use this skill whenever the user mentions AgentRewind, @agentrewind/sdk, agent-rewind, replaying agent runs, recording LLM agent trajectories, forking prompts from a step, wrapping model/tool calls, debugging drift, provider codecs for OpenAI/OpenRouter/Anthropic, npm package verification, or creating tests/smoke tests for this package.
+description: Add, modify, debug, verify, or publish AgentRewind deterministic record/replay/fork support in TypeScript LLM-agent codebases. Use this skill whenever the user mentions AgentRewind, @agentrewind/sdk, agent-rewind, replaying agent runs, recording LLM agent trajectories, forking prompts from a step, wrapping model/tool calls, debugging drift, provider presets for OpenAI/OpenRouter/Anthropic, npm package verification, or creating tests/smoke tests for this package.
 ---
 
 # AgentRewind
 
-Use this skill to help engineers integrate AgentRewind into TypeScript agents and verify that record/replay/fork behavior actually works.
+Use this skill to help engineers integrate AgentRewind into TypeScript agents and prove that record/replay/fork behavior works.
 
-AgentRewind captures model calls, tool calls, and entropy draws made through an `AgentContext`. Strict replay should serve recorded outputs and make zero live model/tool calls.
+AgentRewind captures the external boundaries that make agents hard to debug:
 
-The published package family is:
+- model calls through `ctx.model.create()` or `ctx.model.stream()`
+- tool calls through `ctx.tools.*`
+- prompt-affecting entropy through `ctx.uuid()`, `ctx.clock()`, `ctx.random()`, and `ctx.env(key)`
 
-- `@agentrewind/sdk`: normal application entrypoint. It installs and re-exports the runtime, CLI, built-in provider codecs, OpenAI and Anthropic clients, and replay test helpers.
-- `@agentrewind/core`: dependency-free runtime.
-- `@agentrewind/cli`: CLI implementation used by the SDK package.
-- `@agentrewind/test`: replay regression helpers.
-- `@agentrewind/codec-openai`, `@agentrewind/codec-openrouter`, `@agentrewind/codec-anthropic`: provider codecs.
+Strict replay should serve recorded boundary outputs and make zero live model or tool calls. Forking reuses a recorded prefix, then sends the tail live so prompt/model changes can be tested from the exact failed step.
 
-Use `@agentrewind/sdk` for application imports. Use `agentrewind` only as the CLI command name, not as a package import.
+## Package Surface
+
+Install one package for normal app use:
+
+```sh
+npm install @agentrewind/sdk
+```
+
+`@agentrewind/sdk` installs the runtime, CLI binaries (`agentrewind` and `arw`), built-in provider codecs, OpenAI client, Anthropic client, and replay test helpers. Use this root SDK export in application code. Use `@agentrewind/sdk/testing` for test helpers and `@agentrewind/sdk/advanced` for lower-level internals.
+
+Granular packages still exist for library authors: `@agentrewind/core`, `@agentrewind/cli`, `@agentrewind/test`, `@agentrewind/codec-openai`, `@agentrewind/codec-openrouter`, and `@agentrewind/codec-anthropic`.
+
+Do not import from an unscoped `agentrewind` package. `agentrewind` is the CLI command name.
 
 ## First Moves
 
 1. Inspect the target repo before editing:
    - `package.json`
-   - provider SDK usage (`rg "new OpenAI|Anthropic|chat\\.completions|messages\\.create|responses\\.create"`)
-   - tool/external I/O boundaries
-   - tests and dev scripts
-2. Identify the provider path:
-   - OpenAI Chat Completions or generic OpenAI-compatible: `openaiChatCodec()`
-   - OpenRouter: `openRouterChatCodec()` and `openRouterClientOptions()`
-   - Anthropic Messages: `anthropicCodec()`
-   - Other SDK shape: custom `ProviderCodec`
-3. Confirm model calls can be routed through `ctx.model.create()` or `ctx.model.stream()`.
-4. Route external work that affects prompts/control flow through `ctx.tools`.
-5. Route prompt-affecting entropy through `ctx.uuid()`, `ctx.clock()`, and `ctx.random()`.
-6. Add or update tests with fake SDK-shaped clients before suggesting live API tests.
+   - provider SDK usage: `rg "new OpenAI|Anthropic|chat\\.completions|messages\\.create|responses\\.create|baseURL|OPENROUTER"`
+   - tool and external I/O boundaries
+   - existing tests, build scripts, and CI scripts
+2. Choose the simplest provider preset that matches the agent:
+   - OpenAI Chat Completions: `createOpenAIRewind()`
+   - generic OpenAI-compatible Chat Completions endpoint: `createOpenAICompatibleRewind()`
+   - OpenRouter: `createOpenRouterRewind()`
+   - Anthropic Messages: `createAnthropicRewind()`
+3. Confirm model calls can move behind `ctx.model.create()` or `ctx.model.stream()`.
+4. Move external work that affects prompts, tool arguments, or control flow behind `ctx.tools`.
+5. Move prompt-affecting entropy behind `ctx.uuid()`, `ctx.clock()`, `ctx.random()`, and `ctx.env(key)`.
+6. Add fake-client tests before suggesting live API tests.
 
 For exact provider setup snippets, read `references/provider-setup.md`.
 For implementation patterns, read `references/implementation-patterns.md`.
 For verification and smoke-test strategy, read `references/verification.md`.
 
-## Integration Workflow
+## Default Integration Workflow
 
-Use this sequence for most code changes:
+Use provider presets first. They bind the model client, codec, default store, tool handlers, and provider-specific TypeScript request/response types.
 
-1. Install `@agentrewind/sdk`.
-2. Create the live SDK client outside the harness.
-3. Select the codec once and reuse it for record/replay/fork.
-4. Fail fast if the client and codec do not match:
-   ```ts
-   assertProviderClient(model, codec);
-   ```
-5. Define a harness:
-   ```ts
-   import { assertProviderClient, defineHarness, defineTools } from "@agentrewind/sdk";
+```ts
+import { createOpenAIRewind, defineAgent, defineHarness, defineTools } from "@agentrewind/sdk";
+import type { ChatCompletion } from "@agentrewind/sdk";
 
-   assertProviderClient(model, codec);
+const tools = defineTools({
+  lookupCustomer: async (args: { customerId: string }) => crm.customers.get(args.customerId)
+});
 
-   const tools = defineTools({
-     lookup: async (args: { id: string }) => externalSystem.lookup(args.id)
-   });
+const rewind = createOpenAIRewind({ store: ".rewind", tools });
 
-   const harness = defineHarness(tools, async (ctx) => {
-     const id = ctx.uuid();
-     const data = await ctx.tools.lookup({ id });
-     return ctx.model.create(requestFrom(data), { site: "decision-name" });
-   });
-   ```
-6. Record:
-   ```ts
-   const recorded = await AgentRewind.recordRun(
-     {
-       id: "demo",
-       store: ".rewind",
-       model,
-       codec,
-       tools
-     },
-     harness
-   );
-   ```
-7. Replay:
-   ```ts
-   await AgentRewind.replayRun(recorded.path, { codec }, harness);
-   ```
-8. Inspect:
-   ```sh
-   agentrewind inspect .rewind/demo
-   agentrewind inspect .rewind/demo --json
-   agentrewind context .rewind/demo
-   agentrewind context .rewind/demo --site decision-name
-   agentrewind diff .rewind/demo
-   agentrewind fork .rewind/demo --site decision-name --system "Try the corrected prompt." --dry-run
-   ```
+const harness = defineHarness(tools, async (ctx) => {
+  const customer = await ctx.tools.lookupCustomer({ customerId: "cus_123" });
+  const completion = await ctx.model.create<ChatCompletion>(
+    {
+      model: process.env.OPENAI_MODEL ?? "gpt-5.5",
+      messages: [{ role: "user", content: JSON.stringify(customer) }],
+      temperature: 0
+    },
+    { site: "summarize-customer" }
+  );
+
+  return completion.choices[0]?.message.content ?? "";
+});
+
+const agent = defineAgent({ tools, harness });
+const recorded = await rewind.recordRun({ id: "support-summary" }, agent);
+const replayed = await rewind.replayRun(recorded.path, agent);
+```
+
+Use `defineAgent({ tools, harness })` when an agent has tools. It keeps the runtime tools and typed harness together so users do not pass tools in two places.
+
+Use `AgentRewind.withProvider({ model, codec, store, tools })` when the app already constructs its provider client or uses a custom codec. Use low-level `AgentRewind.record()` / `AgentRewind.replay()` only when the integration needs manual session control.
+
+## CLI Workflow
+
+Useful commands after the first recording:
+
+```sh
+agentrewind list .rewind
+agentrewind doctor latest --store .rewind
+agentrewind inspect latest --store .rewind
+agentrewind timeline latest --store .rewind --kind model_call --site summarize-customer
+agentrewind context latest --store .rewind --site summarize-customer
+agentrewind prompt latest --store .rewind --step 3
+agentrewind tool latest --store .rewind --name lookupCustomer
+agentrewind entropy latest --store .rewind --source uuid
+agentrewind fork latest --store .rewind --site summarize-customer --system "Try the corrected policy prompt." --dry-run
+agentrewind pack latest demo.rewind --store .rewind
+```
+
+Use `doctor` first when a session looks suspicious. Use `inspect`/`timeline` for step numbers and filters. Use `context`/`prompt` to read the exact recorded model prompt. Use `fork --dry-run` to verify a fork plan without spending provider tokens; add `--check-provider` when you explicitly want credential/client validation during the dry run.
 
 ## Engineering Rules
 
-- Give every meaningful model call a stable `site`, e.g. `{ site: "classify-ticket" }`.
-- Use CLI `--site`, `--from-site`, and `--to-site` when inspecting named model calls.
-- Use `assertProviderClient(model, codec)` during setup so wrong SDK/codec pairs fail before recording.
-- Import public runtime helpers from `@agentrewind/sdk` in applications unless there is a specific reason to depend on `@agentrewind/core` directly.
-- Do not call provider SDK methods directly inside the harness.
-- Do not import from an unscoped `agentrewind` package; that name is not the published SDK package.
-- Do not use ambient `Date.now()`, `Math.random()`, or `crypto.randomUUID()` when values can affect prompts, tool args, or branching.
-- Do not claim live provider compatibility unless a real-key smoke test was run.
-- Do not ask users to paste API keys. Use a local env file outside the repo, such as `/tmp/agentrewind-smoke.env`.
-- Treat replay drift as useful signal. Do not paper over it unless the user explicitly chooses `passthrough`.
+- Give every meaningful model call a stable `site`, such as `{ site: "classify-ticket" }`.
+- Use `ctx.model.*`, `ctx.tools.*`, and `ctx.env()` inside harnesses instead of direct provider SDK, external API, or `process.env` reads when the value can affect prompts or branching.
+- Keep provider setup outside the harness.
+- Prefer provider presets and `defineAgent()` for normal app code.
+- Use `assertProviderClient(model, codec)` only on manual provider wiring.
+- Treat replay drift as useful signal. Do not hide it with permissive replay modes when building deterministic tests.
+- Do not ask users to paste API keys. Use local env files outside the repo, such as `/tmp/agentrewind-smoke.env` or `/tmp/agentrewind-npm.env`.
 - Keep `.rewind/*/vault.enc` local. Use `agentrewind pack` before sharing sessions.
 
 ## Provider Decision Tree
 
-- If code uses `client.chat.completions.create()` with OpenAI: use `openaiChatCodec()`.
-- If code uses OpenRouter: use `openRouterChatCodec()` and `openRouterClientOptions()`.
-- If code uses another OpenAI-compatible endpoint via `baseURL`: use `openaiChatCodec()`.
-- If code uses Anthropic `client.messages.create()`: use `anthropicCodec()`.
-- If code uses OpenAI Responses API, Assistants API, raw `fetch`, or another SDK shape: explain that no built-in codec wraps it yet; implement a custom `ProviderCodec` or adapt the client behind supported method paths.
+- OpenAI Chat Completions: `createOpenAIRewind()`.
+- Generic OpenAI-compatible endpoint with `baseURL`: `createOpenAICompatibleRewind()`.
+- OpenRouter: `createOpenRouterRewind()`.
+- Anthropic Messages: `createAnthropicRewind()`.
+- Existing provider client plus built-in codec: `AgentRewind.withProvider({ model, codec })`.
+- OpenAI Responses API, Assistants API, raw `fetch`, or another SDK shape: no built-in codec wraps it yet. Implement a custom `ProviderCodec` or adapt the client behind a supported method path.
 
 ## Verification Checklist
 
-Before saying the integration works, verify with evidence:
+Before saying an integration works, verify with evidence:
 
 - TypeScript compiles.
-- Tests pass.
-- A fake-client record/replay test proves no second live call is made during strict replay.
+- Unit tests pass.
+- A fake-client record/replay test proves strict replay does not make a second live model call.
+- Tool handlers are not called again during strict replay.
 - Streaming is tested if the agent streams.
-- Tool handlers are not called during strict replay.
-- Entropy values embedded in prompts are replayed.
-- Redaction keeps key-shaped secrets out of `events.jsonl`.
-- `agentrewind inspect/context/diff/fork/pack/unpack` works on a recorded session when CLI behavior is in scope.
-- Use `agentrewind inspect --json` when an automation needs stable timeline fields.
+- Entropy values embedded in prompts are replayed, including `ctx.env()`.
+- CLI inspection works on a recorded session: `doctor`, `inspect`/`timeline`, `context`/`prompt`, `tool`, `entropy`, `fork --dry-run`, `pack`, and `unpack`.
+- Redaction keeps key-shaped secrets out of `events.jsonl`; packed bundles exclude `vault.enc`.
 - Optional live smoke tests run only from local env vars and never print secrets.
-- If package exports or metadata changed, verify an installed consumer can import from `@agentrewind/sdk` and run `npx agentrewind --help`.
 
 ## When Modifying This Package Itself
 
-If the user is editing AgentRewind rather than adopting it in another repo:
+If the user is editing the AgentRewind package rather than adopting it:
 
-- Run `pnpm check` after changes.
-- Run a built-artifact probe if package exports changed.
-- Run `pnpm pack:packages` and `pnpm publish:dry-run` before publishing.
-- After publishing, verify all public packages with `npm view <package> version` and run a clean npm install smoke test.
-- For provider changes, test both normalization fixtures and AgentRewind record/replay round trips.
-- For OpenAI, Anthropic, or OpenRouter SDK syntax, fetch current docs first.
+- Run the focused script for the changed area when possible: `pnpm test:unit`, `pnpm test:cli`, `pnpm test:providers`, or `pnpm test:coverage`.
+- Run `pnpm check` before release-level claims.
+- Run `pnpm release:check`, `pnpm package:smoke`, and `pnpm publish:dry-run` before publishing.
+- After publishing, verify npm versions and run a clean install/import/bin smoke test.
+- For provider changes, test deterministic codec fixtures and fork record/replay round trips.
+- For OpenAI, Anthropic, or OpenRouter SDK syntax changes, fetch current provider docs first.

@@ -2,96 +2,104 @@
 
 Use this reference when modifying an agent codebase.
 
-## Minimal Record/Replay Shape
+## Minimal Record And Replay
 
 ```ts
-import { AgentRewind, assertProviderClient, defineHarness } from "@agentrewind/sdk";
+import { createOpenAIRewind, defineHarness } from "@agentrewind/sdk";
+import type { ChatCompletion } from "@agentrewind/sdk";
 
-assertProviderClient(model, codec);
+const rewind = createOpenAIRewind({ store: ".rewind" });
 
 const harness = defineHarness(async (ctx) => {
-  const response = await ctx.model.create(
+  const completion = await ctx.model.create<ChatCompletion>(
     {
-      model: "provider-model",
+      model: process.env.OPENAI_MODEL ?? "gpt-5.5",
       messages: [{ role: "user", content: `Request ${ctx.uuid()}` }]
     },
     { site: "answer-question" }
   );
 
-  return response;
+  return completion.choices[0]?.message.content ?? "";
 });
 
-const recorded = await AgentRewind.recordRun(
-  {
-    id: "demo",
-    store: ".rewind",
-    model,
-    codec
-  },
-  harness
-);
-
-const replayed = await AgentRewind.replayRun(recorded.path, { codec }, harness);
+const recorded = await rewind.recordRun({ id: "demo" }, harness);
+const replayed = await rewind.replayRun(recorded.path, harness);
 ```
 
-## Wrapping Tools
+Strict replay should return the same harness result while making zero live provider calls.
 
-External I/O that affects prompts or control flow should be a tool:
+## Tools And External I/O
+
+External I/O that affects prompts, tool arguments, or control flow should be a tool. Use `defineAgent()` so tools and harness stay together at runtime:
 
 ```ts
-import { AgentRewind, defineHarness, defineTools } from "@agentrewind/sdk";
+import { createOpenAIRewind, defineAgent, defineHarness, defineTools } from "@agentrewind/sdk";
+import type { ChatCompletion } from "@agentrewind/sdk";
 
 const tools = defineTools({
   lookupCustomer: async (args: { customerId: string }) => {
-    const { customerId } = args;
-    return crm.customers.get(customerId);
+    return crm.customers.get(args.customerId);
+  },
+  createEscalation: async (args: { ticketId: string; reason: string }) => {
+    return support.createEscalation(args);
   }
 });
 
-const session = AgentRewind.record({
-  id: "support-router",
-  store: ".rewind",
-  model,
-  codec,
-  tools
-});
+const rewind = createOpenAIRewind({ store: ".rewind", tools });
 
 const harness = defineHarness(tools, async (ctx) => {
   const customer = await ctx.tools.lookupCustomer({ customerId: "cus_123" });
-  return ctx.model.create(
+  const completion = await ctx.model.create<ChatCompletion>(
     {
-      model: "provider-model",
+      model: "gpt-5.5",
       messages: [{ role: "user", content: JSON.stringify(customer) }]
     },
-    { site: "summarize-customer" }
+    { site: "route-ticket" }
   );
+
+  if (completion.choices[0]?.message.content?.includes("escalate")) {
+    await ctx.tools.createEscalation({ ticketId: "ticket_123", reason: "policy exception" });
+  }
+
+  return completion;
+});
+
+const agent = defineAgent({ tools, harness });
+const recorded = await rewind.recordRun({ id: "support-router" }, agent);
+await rewind.replayRun(recorded.path, agent);
+```
+
+Strict replay serves recorded tool outputs and should not execute the live tool handlers again.
+
+## Existing Client Or Codec
+
+If the app already owns the provider client, bind it once:
+
+```ts
+import { AgentRewind, OpenAI, assertProviderClient, openaiChatCodec } from "@agentrewind/sdk";
+
+const model = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const codec = openaiChatCodec();
+assertProviderClient(model, codec);
+
+const rewind = AgentRewind.withProvider({
+  store: ".rewind",
+  model,
+  codec
 });
 ```
 
-Strict replay should not execute the live tool handler again.
+Use direct `AgentRewind.record()` only when you need manual session lifecycle methods such as `session.note()`, `session.close()`, or `session.pack()`.
 
-## Provider Client Validation
+## Entropy And Environment
 
-Before recording, validate that the codec can find the provider method it wraps:
-
-```ts
-assertProviderClient(model, codec);
-```
-
-For streaming-first workflows:
-
-```ts
-assertProviderClient(model, codec, ["stream"]);
-```
-
-## Entropy
-
-Use `ctx` entropy whenever values affect prompts, tool args, filenames, or branching:
+Use `ctx` entropy whenever a value can affect prompts, tool arguments, filenames, or branching:
 
 ```ts
 const requestId = ctx.uuid();
 const receivedAt = ctx.clock();
 const sample = ctx.random();
+const featureFlag = ctx.env("SUPPORT_ROUTER_POLICY");
 ```
 
 Ambient entropy is not intercepted:
@@ -99,81 +107,145 @@ Ambient entropy is not intercepted:
 - `Date.now()`
 - `Math.random()`
 - `crypto.randomUUID()`
+- direct `process.env` reads inside prompts or branches
 
 ## Stable Call Sites
 
-Pass `site` to model calls:
+Pass `site` to important model calls:
 
 ```ts
 await ctx.model.create(request, { site: "classify-ticket" });
 await ctx.model.stream(request, { site: "draft-reply-stream" });
 ```
 
-Use human-readable names that map to agent decisions. Avoid generated IDs,
-timestamps, or model names in `site`.
+Use names that map to agent decisions. Avoid generated IDs, timestamps, or model names in `site`.
+
+## Streaming
+
+Use `ctx.model.stream()` for streaming agents:
+
+```ts
+import type { ChatCompletionChunk } from "@agentrewind/sdk";
+
+let text = "";
+for await (const chunk of ctx.model.stream<ChatCompletionChunk>(
+  {
+    model: "gpt-5.5",
+    messages: [{ role: "user", content: "Stream one sentence." }]
+  },
+  { site: "stream-answer" }
+)) {
+  text += chunk.choices[0]?.delta?.content ?? "";
+}
+return text;
+```
+
+Record and replay should reconstruct the same user-visible stream output.
+
+## Inspecting A Session
+
+Start with:
+
+```sh
+agentrewind list .rewind
+agentrewind doctor latest --store .rewind
+agentrewind inspect latest --store .rewind
+```
+
+For large sessions, use filters:
+
+```sh
+agentrewind timeline latest --store .rewind --kind model_call --site classify-ticket
+agentrewind inspect latest --store .rewind --errors
+agentrewind inspect latest --store .rewind --live --from 4 --to 12
+agentrewind context latest --store .rewind --site classify-ticket
+agentrewind prompt latest --store .rewind --step 5
+agentrewind tool latest --store .rewind --name lookupCustomer --json
+agentrewind entropy latest --store .rewind --source env
+```
+
+Use `inspect --json` for automation. Use `--full-fingerprint` when comparing exact request or tool hashes.
 
 ## Forking
 
-Forking replays the prefix and sends the tail live:
+Forking replays the recorded prefix and sends the tail live:
 
 ```sh
-agentrewind inspect .rewind/demo
-agentrewind fork .rewind/demo --site classify-ticket --system "Prioritize escalation accuracy over brevity."
+agentrewind fork latest \
+  --store .rewind \
+  --site classify-ticket \
+  --system "Escalate enterprise refund exceptions to a support manager." \
+  --model gpt-5.5 \
+  --dry-run
 ```
 
-Use the SDK directly when the fork needs current harness code or a goal
-predicate:
+Dry runs verify the fork plan without provider tokens. Add `--check-provider` when you want dry run to validate credentials and provider wiring. Built-in CLI providers are `openai`, `openai-compatible`, `openrouter`, and `anthropic`.
+
+Use SDK fork when you need the current harness, a goal predicate, or programmatic assertions:
 
 ```ts
-const replay = await AgentRewind.replay(".rewind/demo", { codec, model });
+const replay = await rewind.replay("latest");
+await replay.run(agent.harness);
 
 const fork = await replay.fork({
-  atStep: 3,
-  harness,
-  model,
+  atStep: 5,
+  harness: agent.harness,
   overrides: {
-    system: "Prioritize escalation accuracy over brevity.",
-    model: "new-model"
+    system: "Escalate enterprise refund exceptions to a support manager.",
+    model: "gpt-5.5"
   },
-  goal: (trace) => trace.reached("sendEscalation")
+  tools: {
+    onMatch: "serve-recorded",
+    onMiss: "error"
+  },
+  goal: (trace) => trace.reached("createEscalation", { ticketId: "ticket_123" })
 });
+
+console.log(fork.sessionId, fork.reachedGoal, fork.tokensSpent);
 ```
 
-Use `agentrewind inspect .rewind/demo` to find model-call steps. `tokensSpent`
-only counts live tail model calls.
+Supported fork tool policy is intentionally narrow:
+
+- `onMatch: "serve-recorded"`
+- `onMiss: "error"` or `"stub"`
+
+Do not document live tail tool execution unless the package implements it.
 
 ## Redaction And Sharing
 
 Redaction is enabled by default. Add project-specific patterns when needed:
 
 ```ts
-const session = AgentRewind.record({
+const rewind = createOpenAIRewind({
+  store: ".rewind"
+});
+
+const recorded = await rewind.recordRun({
   id: "redaction-demo",
-  store: ".rewind",
-  model,
-  codec,
   redaction: {
     enabled: true,
     patterns: [/customer-secret-[a-z0-9]+/gi]
   }
-});
+}, harness);
 ```
 
 Pack before sharing:
 
 ```sh
-agentrewind pack .rewind/demo demo.rewind
+agentrewind pack latest demo.rewind --store .rewind
+agentrewind unpack demo.rewind unpacked-demo
 ```
 
-The packed bundle excludes `vault.enc`; it should include `meta.json`,
-`events.jsonl`, and blobs.
+Packed bundles exclude `vault.enc` and reject unsafe archive paths. Keep raw `.rewind/<session>/vault.enc` local.
 
 ## Common Mistakes
 
-- Calling `client.chat.completions.create()` directly inside the harness.
-- Forgetting `await session.close()`.
-- Importing from an unscoped `agentrewind` package instead of `@agentrewind/sdk`.
+- Calling `client.chat.completions.create()` or `client.messages.create()` directly inside the harness.
+- Calling external APIs directly inside the harness instead of using `ctx.tools`.
+- Forgetting to use `defineAgent({ tools, harness })` for tool agents.
+- Passing different tools objects to the bound helper and the agent.
 - Reusing `ctx.model.create()` for streaming instead of `ctx.model.stream()`.
-- Using `Date.now()` in a prompt and then expecting strict replay to match.
+- Using `Date.now()`, `Math.random()`, `crypto.randomUUID()`, or `process.env` directly in prompt-affecting code.
+- Omitting stable `site` names on important model calls.
 - Treating `warn` or `passthrough` replay as deterministic test evidence.
-- Using the OpenAI codec for OpenRouter when first-class OpenRouter reporting is desired.
+- Using the generic OpenAI-compatible helper for OpenRouter when first-class OpenRouter recording and fork behavior is desired.
