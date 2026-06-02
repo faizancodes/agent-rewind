@@ -13,7 +13,7 @@ AgentRewind captures the external boundaries that make agents hard to debug:
 - tool calls through `ctx.tools.*`
 - prompt-affecting entropy through `ctx.uuid()`, `ctx.clock()`, `ctx.random()`, and `ctx.env(key)`
 
-Strict replay should serve recorded boundary outputs and make zero live model or tool calls. Forking reuses a recorded prefix, then sends the tail live so prompt/model changes can be tested from the exact failed step.
+Strict replay should serve recorded boundary outputs and make zero live model or tool calls. Forking reuses a recorded prefix, then sends the tail live so prompt/model changes can be tested from the exact failed step. A forked child session must persist both pieces: recorded prefix boundaries with `provenance: "recorded"` and forked tail boundaries with live or stub provenance.
 
 ## Package Surface
 
@@ -137,6 +137,7 @@ Before saying an integration works, verify with evidence:
 - Streaming is tested if the agent streams.
 - Entropy values embedded in prompts are replayed, including `ctx.env()`.
 - CLI inspection works on a recorded session: `doctor`, `inspect`/`timeline`, `context`/`prompt`, `tool`, `entropy`, `fork --dry-run`, `pack`, and `unpack`.
+- Fork tests replay the child session with the full matching harness and prove prefix tools/entropy are served from the child recording. For prompt fixes, the matching harness should include the updated prompt code that the fork tested.
 - Redaction keeps key-shaped secrets out of `events.jsonl`; packed bundles exclude `vault.enc`.
 - Optional live smoke tests run only from local env vars and never print secrets.
 

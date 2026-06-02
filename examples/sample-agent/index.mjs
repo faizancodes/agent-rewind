@@ -94,7 +94,11 @@ const incident = {
 };
 
 try {
-  const harness = async (ctx) => {
+  const originalSystemPrompt = "You classify incidents for the on-call team. Return compact JSON.";
+  const fixedSystemPrompt =
+    "You are an incident commander. Follow runbooks strictly. Enterprise checkout impact with p95 latency above 2000 ms must page the primary on-call.";
+
+  const createHarness = (systemPrompt) => async (ctx) => {
     // The harness is the agent workflow under test. It is run unchanged during
     // record, replay, and fork.
     //
@@ -116,7 +120,7 @@ try {
     const response = await ctx.model.create(
       {
         model: "ops-routing-model",
-        system: "You classify incidents for the on-call team. Return compact JSON.",
+        system: systemPrompt,
         messages: [
           {
             role: "user",
@@ -141,6 +145,8 @@ try {
     // close to the real behavior you are debugging.
     return JSON.parse(response.content);
   };
+  const harness = createHarness(originalSystemPrompt);
+  const fixedHarness = createHarness(fixedSystemPrompt);
 
   // The first live model response is intentionally wrong. That gives us a
   // realistic failure to inspect and fork.
@@ -228,8 +234,7 @@ try {
     overrides: {
       // `system` is a common fork override: keep the historical user input, but
       // test a revised system instruction against the exact same situation.
-      system:
-        "You are an incident commander. Follow runbooks strictly. Enterprise checkout impact with p95 latency above 2000 ms must page the primary on-call."
+      system: fixedSystemPrompt
     },
 
     // A goal makes fork output machine-checkable. In real tests, this can assert
@@ -241,6 +246,14 @@ try {
       )
   });
 
+  // A fork writes a child session that contains the recorded prefix plus the new
+  // tail result. Replaying that child with the full fixed harness is how you
+  // turn the prompt experiment into deterministic regression coverage. The
+  // workflow shape is still complete; only the prompt code has been updated to
+  // match the forked tail request.
+  const forkChildReplay = await AgentRewind.replay(join(store, fork.sessionId), { codec });
+  const forkChildDecision = await forkChildReplay.run(fixedHarness);
+
   if (recordedDecision.action !== "watch") {
     throw new Error("The recording did not capture the expected bad decision");
   }
@@ -250,10 +263,13 @@ try {
   if (!fork.reachedGoal) {
     throw new Error("Fork did not reach the corrected paging decision");
   }
+  if (forkChildDecision.action !== "page-primary") {
+    throw new Error("Child replay did not reproduce the forked paging decision");
+  }
 
   // The printed object is what an engineer usually wants after a debugging
   // run: the original decision, the replayed decision, the inspected prompt
-  // context, and the child session created by the fork.
+  // context, and the replayable child session created by the fork.
   console.log(
     JSON.stringify(
       {
@@ -264,6 +280,7 @@ try {
         capturedPrompt,
         forkSessionId: fork.sessionId,
         forkReachedGoal: fork.reachedGoal,
+        forkChildDecision,
         forkTokensSpent: fork.tokensSpent
       },
       null,

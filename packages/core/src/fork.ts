@@ -1,6 +1,7 @@
 import { dirname } from "node:path";
 import type { ForkOverrides, ProviderCodec } from "./codec.js";
 import type {
+  BaseEvent,
   EventProvenance,
   ModelCallEvent,
   NormalizedRequest,
@@ -8,18 +9,19 @@ import type {
   ToolCallEvent,
   Usage
 } from "./events.js";
-import type { AgentContext, Harness, ToolHandlers, UntypedToolHandlers, WrappedModel, WrappedTools } from "./record.js";
+import type { AgentContext, BoundarySeed, Harness, ToolHandlers, UntypedToolHandlers, WrappedModel, WrappedTools } from "./record.js";
 import type { EntropyRuntime } from "./entropy.js";
 import { RecordSession } from "./record.js";
 import type { ReplaySession } from "./replay.js";
 import { deriveCallSite, LaneManager } from "./context.js";
-import { EntropyReplay } from "./entropy.js";
+import { defaultEntropyRuntime, EntropyReplay } from "./entropy.js";
 import { fingerprint, fingerprintUnknown } from "./fingerprint.js";
 import { PendingStore } from "./matcher.js";
 import { patternsFromLabels, Redactor } from "./redaction.js";
 import { deserializeToolValue, serializeToolValue } from "./tool-serialization.js";
 import { DriftError, RewindError } from "./errors.js";
 import { usageAdd } from "./tokens.js";
+import { CURRENT_SCHEMA_VERSION } from "./migrate.js";
 
 export interface ForkOptions<
   TTools extends ToolHandlers = UntypedToolHandlers,
@@ -27,7 +29,7 @@ export interface ForkOptions<
   TResponse = unknown,
   TStreamChunk = unknown
 > {
-  /** Boundary step where live tail execution begins. */
+  /** Boundary step where live execution begins. Earlier boundaries are copied into the child as recorded provenance. */
   atStep: number;
   /** Harness to execute for this fork. Defaults to the last harness passed to `replay.run()`, then to a stored-event tail walk. */
   harness?: Harness<unknown, TTools, TRequest, TResponse, TStreamChunk>;
@@ -46,15 +48,15 @@ export interface ForkOptions<
 }
 
 export interface ForkResult {
-  /** Child recording session id. */
+  /** Child recording session id. The child contains the recorded prefix plus the forked live/stub tail. */
   sessionId: string;
   /** Result of the optional goal predicate. */
   reachedGoal?: boolean;
-  /** Token usage spent by live tail model calls. */
+  /** Token usage spent by live tail model calls only. Recorded prefix events do not add token spend. */
   tokensSpent: Usage;
   /** Step where fork halted because of tail divergence. */
   divergedAtStep?: number;
-  /** Combined prefix/tail trace. */
+  /** Trace from the persisted child session, including recorded prefix and forked tail events. */
   trace: Trace;
 }
 
@@ -135,7 +137,7 @@ export async function forkReplay<
     replay.stored.vault
   );
   const lanes = new LaneManager();
-  const traceEvents: RewindEvent[] = [];
+  const runtime = { ...defaultEntropyRuntime, ...opts.runtime };
   let tokensSpent: Usage = { inputTokens: 0, outputTokens: 0 };
   let divergedAtStep: number | undefined;
 
@@ -147,7 +149,8 @@ export async function forkReplay<
     entropy,
     redactor,
     lanes,
-    traceEvents,
+    runtime,
+    callOrdinals: new Map(),
     liveModel,
     codec,
     addUsage: (usage) => {
@@ -173,7 +176,7 @@ export async function forkReplay<
   }
 
   await child.close();
-  const trace = new ForkTrace([...traceEvents, ...child.events()]);
+  const trace = new ForkTrace(child.events());
   return {
     sessionId: child.id,
     reachedGoal: opts.goal ? opts.goal(trace) : undefined,
@@ -196,10 +199,46 @@ interface ForkContextState<
   entropy: EntropyReplay;
   redactor: Redactor;
   lanes: LaneManager;
-  traceEvents: RewindEvent[];
+  runtime: EntropyRuntime;
+  callOrdinals: Map<string, number>;
   liveModel: unknown;
   codec: ProviderCodec<TRequest, TResponse, TStreamChunk>;
   addUsage(usage: Usage | undefined): void;
+}
+
+interface ForkBoundary extends BoundarySeed {
+  finish(): void;
+}
+
+function beginForkBoundary<TTools extends ToolHandlers>(
+  state: ForkContextState<TTools>,
+  kind: "model_call" | "tool_call" | "entropy",
+  explicit: string | undefined
+): ForkBoundary {
+  const lane = state.lanes.beginBoundaryLane(explicit ? `${kind}\u0000${explicit}` : undefined);
+  const key = `${kind}\u0000${lane}`;
+  const ordinal = state.callOrdinals.get(key) ?? 0;
+  state.callOrdinals.set(key, ordinal + 1);
+  let finished = false;
+  return {
+    lane,
+    seq: state.lanes.nextSeq(lane),
+    step: state.lanes.nextStep(),
+    ts: state.runtime.now(),
+    callSite: kind === "entropy" ? `${explicit ?? "entropy"}:${ordinal}:${explicit ?? "entropy"}` : deriveCallSite(explicit, kind, lane, ordinal),
+    schemaVersion: CURRENT_SCHEMA_VERSION,
+    finish: () => {
+      if (!finished) {
+        finished = true;
+        state.lanes.endBoundaryLane(lane);
+      }
+    }
+  };
+}
+
+function boundaryFromEvent(event: BaseEvent): BoundarySeed {
+  const { step, seq, ts, lane, callSite, schemaVersion } = event;
+  return { step, seq, ts, lane, callSite, schemaVersion };
 }
 
 function forkContext<TTools extends ToolHandlers, TRequest, TResponse, TStreamChunk>(
@@ -226,21 +265,20 @@ function forkModel<TTools extends ToolHandlers, TRequest, TResponse, TStreamChun
     create: async <T = TResponse>(rawRequest: TRequest, callOpts?: { site?: string }) => {
       const normalized = state.codec.normalizeRequest(rawRequest);
       const requestHash = fingerprint(normalized, state.codec, state.redactor, state.replay.stored.meta.fingerprintMode);
-      const lane = state.lanes.beginBoundaryLane(callOpts?.site ? `model_call\u0000${callOpts.site}` : undefined);
-      const callSite = deriveCallSite(callOpts?.site, "model_call", lane, 0);
+      const boundary = beginForkBoundary(state, "model_call", callOpts?.site);
       const expectedStep = nextUnconsumedBoundaryStep(state);
       const resolution = state.matcher.resolve(requestHash, {
         kind: "model_call",
-        callSite,
-        lane
+        callSite: boundary.callSite,
+        lane: boundary.lane
       });
       try {
         if ("hit" in resolution) {
           assertNoSkippedPrefixBoundary(state, expectedStep, resolution.hit.step);
         }
         if ("hit" in resolution && resolution.hit.step < state.opts.atStep) {
-          const event = markProvenance(resolution.hit, "recorded");
-          state.traceEvents.push(event);
+          const event = resolution.hit as ModelCallEvent;
+          recordServedModelCreate(state, event, normalized, callOpts?.site, boundary);
           return valueFromModelEvent(event as ModelCallEvent, state.redactor) as T;
         }
         if (!("hit" in resolution) && expectedStep !== undefined && expectedStep < state.opts.atStep) {
@@ -253,34 +291,31 @@ function forkModel<TTools extends ToolHandlers, TRequest, TResponse, TStreamChun
         const overridden = state.codec.applyOverrides(normalized, state.opts.overrides ?? {}, step);
         const raw = state.codec.denormalizeRequest(overridden) as TRequest;
         const before = state.child.events().length;
-        const live = await state.child.recordLiveModel(raw, state.liveModel, callOpts?.site, "live");
+        const live = await state.child.recordLiveModel(raw, state.liveModel, callOpts?.site, "live", undefined, boundary);
         const recorded = state.child.events().slice(before).filter((event): event is ModelCallEvent => event.kind === "model_call").at(-1);
         state.addUsage(recorded?.usage ?? recorded?.response?.usage);
         return live as T;
       } finally {
-        state.lanes.endBoundaryLane(lane);
+        boundary.finish();
       }
     },
     stream: <T = TStreamChunk>(rawRequest: TRequest, callOpts?: { site?: string }) => {
       const normalized = state.codec.normalizeRequest(rawRequest);
       const requestHash = fingerprint(normalized, state.codec, state.redactor, state.replay.stored.meta.fingerprintMode);
-      const lane = state.lanes.beginBoundaryLane(callOpts?.site ? `model_call\u0000${callOpts.site}` : undefined);
+      const boundary = beginForkBoundary(state, "model_call", callOpts?.site);
       const expectedStep = nextUnconsumedBoundaryStep(state);
       const resolution = state.matcher.resolve(requestHash, {
         kind: "model_call",
-        callSite: deriveCallSite(callOpts?.site, "model_call", lane, 0),
-        lane
+        callSite: boundary.callSite,
+        lane: boundary.lane
       });
       try {
         if ("hit" in resolution) {
           assertNoSkippedPrefixBoundary(state, expectedStep, resolution.hit.step);
         }
         if ("hit" in resolution && resolution.hit.step < state.opts.atStep) {
-          const event = markProvenance(resolution.hit, "recorded") as ModelCallEvent;
-          state.traceEvents.push(event);
-          return finalizeStream(state.codec.rebuildStream(state.redactor.vault.restore(event.stream ?? [])), () =>
-            state.lanes.endBoundaryLane(lane)
-          ) as AsyncIterable<T>;
+          const event = resolution.hit as ModelCallEvent;
+          return finalizeStream(recordServedModelStream(state, event, normalized, callOpts?.site, boundary), boundary.finish) as AsyncIterable<T>;
         }
         if (!("hit" in resolution) && expectedStep !== undefined && expectedStep < state.opts.atStep) {
           throw new ForkDiverged(expectedStep);
@@ -292,13 +327,13 @@ function forkModel<TTools extends ToolHandlers, TRequest, TResponse, TStreamChun
         const overridden = state.codec.applyOverrides(normalized, state.opts.overrides ?? {}, step);
         const raw = state.codec.denormalizeRequest(overridden) as TRequest;
         const before = state.child.events().length;
-        return finalizeStream(state.child.recordLiveModelStream(raw, state.liveModel, callOpts?.site, "live"), () => {
+        return finalizeStream(state.child.recordLiveModelStream(raw, state.liveModel, callOpts?.site, "live", boundary), () => {
           const recorded = state.child.events().slice(before).filter((event): event is ModelCallEvent => event.kind === "model_call").at(-1);
           state.addUsage(recorded?.usage ?? recorded?.response?.usage);
-          state.lanes.endBoundaryLane(lane);
+          boundary.finish();
         }) as AsyncIterable<T>;
       } catch (error) {
-        state.lanes.endBoundaryLane(lane);
+        boundary.finish();
         throw error;
       }
     }
@@ -324,59 +359,57 @@ function forkToolCall<TTools extends ToolHandlers>(
   name: string,
   args: unknown
 ): Promise<unknown> | AsyncIterable<unknown> {
-  const lane = state.lanes.beginBoundaryLane(`tool_call\u0000${name}`);
+  const boundary = beginForkBoundary(state, "tool_call", name);
   try {
     const serializedArgs = serializeToolValue(state.replay.opts.toolSerializers, name, "args", args, `tool.${name}.args`);
     const argsHash = fingerprintUnknown(serializedArgs, state.redactor);
     const expectedStep = nextUnconsumedBoundaryStep(state);
     const resolution = state.matcher.resolve(argsHash, {
       kind: "tool_call",
-      callSite: deriveCallSite(name, "tool_call", lane, 0),
-      lane,
+      callSite: boundary.callSite,
+      lane: boundary.lane,
       name
     });
     if ("hit" in resolution) {
-      const event = markProvenance(resolution.hit, "recorded") as ToolCallEvent;
+      const event = resolution.hit as ToolCallEvent;
       assertNoSkippedPrefixBoundary(state, expectedStep, event.step);
       if (event.step < state.opts.atStep) {
-        state.traceEvents.push(event);
         if (event.error) {
           const restoredError = state.redactor.vault.restore(event.error);
-          return Promise.reject(new RewindError(restoredError.message, restoredError.data)).finally(() => state.lanes.endBoundaryLane(lane));
+          state.child.recordServedToolError(name, args, argsHash, event.error, "recorded", boundary);
+          return Promise.reject(new RewindError(restoredError.message, restoredError.data)).finally(boundary.finish);
         }
         if (event.stream) {
           const restoredChunks = state.redactor.vault.restore(event.stream).map((chunk) => ({
             ...chunk,
             data: deserializeToolValue(state.replay.opts.toolSerializers, name, "streamChunk", chunk.data)
           }));
-          return finalizeStream(replayToolStream(restoredChunks), () => state.lanes.endBoundaryLane(lane));
+          return finalizeStream(state.child.recordServedToolStream(name, args, restoredChunks, argsHash, "recorded", boundary), boundary.finish);
         }
         const restoredResult = state.redactor.vault.restore(event.result);
-        return Promise.resolve(deserializeToolValue(state.replay.opts.toolSerializers, name, "result", restoredResult)).finally(() =>
-          state.lanes.endBoundaryLane(lane)
-        );
+        const result = deserializeToolValue(state.replay.opts.toolSerializers, name, "result", restoredResult);
+        state.child.recordServedToolResult(name, args, result, argsHash, "recorded", boundary);
+        return Promise.resolve(result).finally(boundary.finish);
       }
 
       const policy = state.opts.tools?.onMatch ?? "serve-recorded";
       void policy;
       if (event.error) {
         const restoredError = state.redactor.vault.restore(event.error);
-        state.child.recordServedToolError(name, args, argsHash, event.error, "recorded");
-        return Promise.reject(new RewindError(restoredError.message, restoredError.data)).finally(() => state.lanes.endBoundaryLane(lane));
+        state.child.recordServedToolError(name, args, argsHash, event.error, "recorded", boundary);
+        return Promise.reject(new RewindError(restoredError.message, restoredError.data)).finally(boundary.finish);
       }
       if (event.stream) {
         const restoredChunks = state.redactor.vault.restore(event.stream).map((chunk) => ({
           ...chunk,
           data: deserializeToolValue(state.replay.opts.toolSerializers, name, "streamChunk", chunk.data)
         }));
-        return finalizeStream(state.child.recordServedToolStream(name, args, restoredChunks, argsHash, "recorded"), () =>
-          state.lanes.endBoundaryLane(lane)
-        );
+        return finalizeStream(state.child.recordServedToolStream(name, args, restoredChunks, argsHash, "recorded", boundary), boundary.finish);
       }
       const restoredResult = state.redactor.vault.restore(event.result);
       const result = deserializeToolValue(state.replay.opts.toolSerializers, name, "result", restoredResult);
-      state.child.recordServedToolResult(name, args, result, argsHash, "recorded");
-      return Promise.resolve(result).finally(() => state.lanes.endBoundaryLane(lane));
+      state.child.recordServedToolResult(name, args, result, argsHash, "recorded", boundary);
+      return Promise.resolve(result).finally(boundary.finish);
     }
 
     if (expectedStep !== undefined && expectedStep < state.opts.atStep) {
@@ -385,12 +418,12 @@ function forkToolCall<TTools extends ToolHandlers>(
     const onMiss = state.opts.tools?.onMiss ?? "error";
     if (onMiss === "stub") {
       const result = { __agentrewind_unavailable: true };
-      state.child.recordStubTool(name, args, result, argsHash);
-      return Promise.resolve(result).finally(() => state.lanes.endBoundaryLane(lane));
+      state.child.recordStubTool(name, args, result, argsHash, boundary);
+      return Promise.resolve(result).finally(boundary.finish);
     }
     throw new ForkDiverged(state.opts.atStep);
   } catch (error) {
-    state.lanes.endBoundaryLane(lane);
+    boundary.finish();
     throw error;
   }
 }
@@ -403,27 +436,31 @@ function forkEntropy<TTools extends ToolHandlers>(
   key?: string
 ): number | string | null {
   const explicit = source === "env" && key ? `env:${key}` : source;
-  const lane = state.lanes.beginBoundaryLane(`entropy\u0000${explicit}`);
+  const boundary = beginForkBoundary(state, "entropy", explicit);
   try {
     const expectedStep = nextUnconsumedBoundaryStep(state);
-    const recorded = state.entropy.peek(source, lane, key);
+    const recorded = state.entropy.peek(source, boundary.lane, key);
     if (recorded && recorded.step < state.opts.atStep) {
       if (expectedStep !== undefined && expectedStep < recorded.step && expectedStep < state.opts.atStep) {
         throw new ForkDiverged(expectedStep);
       }
-      const event = state.entropy.nextEvent(source, lane, "strict", key);
-      state.traceEvents.push(markProvenance(event, "recorded"));
+      const event = state.entropy.nextEvent(source, boundary.lane, "strict", key);
+      if (source === "env") {
+        state.child.recordServedEntropy("env", event.value === null ? null : String(event.value), "recorded", key ?? "", boundary);
+      } else {
+        state.child.recordServedEntropy(source, event.value as number | string, "recorded", boundary);
+      }
       return event.value;
     }
     if (expectedStep !== undefined && expectedStep < state.opts.atStep) {
       throw new ForkDiverged(expectedStep);
     }
     if (source === "env") {
-      return state.child.recordEnv(key ?? "", process.env[key ?? ""], "live") ?? null;
+      return state.child.recordEnv(key ?? "", process.env[key ?? ""], "live", boundary) ?? null;
     }
-    return state.child.recordLiveEntropy(source, "live");
+    return state.child.recordLiveEntropy(source, "live", boundary);
   } finally {
-    state.lanes.endBoundaryLane(lane);
+    boundary.finish();
   }
 }
 
@@ -447,8 +484,18 @@ function assertNoSkippedPrefixBoundary<TTools extends ToolHandlers>(
 async function forkFromStoredEvents<TTools extends ToolHandlers>(state: ForkContextState<TTools>): Promise<void> {
   for (const event of [...state.replay.stored.events].sort((a, b) => a.step - b.step)) {
     if (event.step < state.opts.atStep) {
-      if (event.kind === "model_call" || event.kind === "tool_call" || event.kind === "entropy") {
-        state.traceEvents.push(markProvenance(event, "recorded"));
+      if (event.kind === "model_call") {
+        await recordStoredModelEvent(state, event, "recorded");
+      } else if (event.kind === "tool_call") {
+        await forkStoredToolEvent(state, event);
+      } else if (event.kind === "entropy") {
+        if (event.source === "env") {
+          state.child.recordServedEntropy("env", event.value === null ? null : String(event.value), "recorded", event.key ?? "", boundaryFromEvent(event));
+        } else {
+          state.child.recordServedEntropy(event.source, event.value as number | string, "recorded", boundaryFromEvent(event));
+        }
+      } else if (event.kind === "note") {
+        state.child.note(state.redactor.vault.restore(event.text));
       }
       continue;
     }
@@ -463,9 +510,9 @@ async function forkFromStoredEvents<TTools extends ToolHandlers>(state: ForkCont
     }
     if (event.kind === "entropy") {
       if (event.source === "env") {
-        state.child.recordEnv(event.key ?? "", process.env[event.key ?? ""], "live");
+        state.child.recordEnv(event.key ?? "", process.env[event.key ?? ""], "live", boundaryFromEvent(event));
       } else {
-        state.child.recordLiveEntropy(event.source, "live");
+        state.child.recordLiveEntropy(event.source, "live", boundaryFromEvent(event));
       }
       continue;
     }
@@ -473,6 +520,19 @@ async function forkFromStoredEvents<TTools extends ToolHandlers>(state: ForkCont
       state.child.note(state.redactor.vault.restore(event.text));
     }
   }
+}
+
+async function recordStoredModelEvent<TTools extends ToolHandlers, TRequest, TResponse, TStreamChunk>(
+  state: ForkContextState<TTools, TRequest, TResponse, TStreamChunk>,
+  event: ModelCallEvent,
+  provenance: EventProvenance
+): Promise<void> {
+  const normalizedRequest = state.redactor.vault.restore(event.request) as NormalizedRequest;
+  if (event.stream) {
+    await consumeAsyncIterable(recordServedModelStream(state, event, normalizedRequest, undefined, boundaryFromEvent(event), provenance));
+    return;
+  }
+  recordServedModelCreate(state, event, normalizedRequest, undefined, boundaryFromEvent(event), provenance);
 }
 
 async function forkStoredModelEvent<TTools extends ToolHandlers>(state: ForkContextState<TTools>, event: ModelCallEvent): Promise<void> {
@@ -484,12 +544,61 @@ async function forkStoredModelEvent<TTools extends ToolHandlers>(state: ForkCont
   const raw = state.codec.denormalizeRequest(overridden);
   const before = state.child.events().length;
   if (event.stream) {
-    await consumeAsyncIterable(state.child.recordLiveModelStream(raw, state.liveModel, undefined, "live"));
+    await consumeAsyncIterable(state.child.recordLiveModelStream(raw, state.liveModel, undefined, "live", boundaryFromEvent(event)));
   } else {
-    await state.child.recordLiveModel(raw, state.liveModel, undefined, "live");
+    await state.child.recordLiveModel(raw, state.liveModel, undefined, "live", undefined, boundaryFromEvent(event));
   }
   const recorded = state.child.events().slice(before).filter((candidate): candidate is ModelCallEvent => candidate.kind === "model_call").at(-1);
   state.addUsage(recorded?.usage ?? recorded?.response?.usage);
+}
+
+function recordServedModelCreate<TTools extends ToolHandlers, TRequest, TResponse, TStreamChunk>(
+  state: ForkContextState<TTools, TRequest, TResponse, TStreamChunk>,
+  event: ModelCallEvent,
+  normalizedRequest: NormalizedRequest,
+  site: string | undefined,
+  boundary: BoundarySeed,
+  provenance: EventProvenance = "recorded"
+): void {
+  if (event.error) {
+    state.child.recordServedModelError(
+      normalizedRequest,
+      state.redactor.vault.restore(event.error),
+      site,
+      provenance,
+      event.callSite,
+      boundary
+    );
+    return;
+  }
+  state.child.recordServedModelResult(
+    normalizedRequest,
+    state.redactor.vault.restore(event.response),
+    site,
+    provenance,
+    event.callSite,
+    boundary
+  );
+}
+
+function recordServedModelStream<TTools extends ToolHandlers, TRequest, TResponse, TStreamChunk>(
+  state: ForkContextState<TTools, TRequest, TResponse, TStreamChunk>,
+  event: ModelCallEvent,
+  normalizedRequest: NormalizedRequest,
+  site: string | undefined,
+  boundary: BoundarySeed,
+  provenance: EventProvenance = "recorded"
+): AsyncIterable<unknown> {
+  return state.child.recordServedModelStream(
+    normalizedRequest,
+    state.redactor.vault.restore(event.stream ?? []),
+    state.redactor.vault.restore(event.response),
+    event.error ? state.redactor.vault.restore(event.error) : undefined,
+    site,
+    provenance,
+    event.callSite,
+    boundary
+  );
 }
 
 async function forkStoredToolEvent<TTools extends ToolHandlers>(state: ForkContextState<TTools>, event: ToolCallEvent): Promise<void> {
@@ -502,7 +611,7 @@ async function forkStoredToolEvent<TTools extends ToolHandlers>(state: ForkConte
     state.redactor.vault.restore(event.args)
   );
   if (event.error) {
-    state.child.recordServedToolError(event.name, args, event.argsHash, event.error, "recorded");
+    state.child.recordServedToolError(event.name, args, event.argsHash, event.error, "recorded", boundaryFromEvent(event));
     return;
   }
   if (event.stream) {
@@ -510,7 +619,7 @@ async function forkStoredToolEvent<TTools extends ToolHandlers>(state: ForkConte
       ...chunk,
       data: deserializeToolValue(state.replay.opts.toolSerializers, event.name, "streamChunk", chunk.data)
     }));
-    await consumeAsyncIterable(state.child.recordServedToolStream(event.name, args, chunks, event.argsHash, "recorded"));
+    await consumeAsyncIterable(state.child.recordServedToolStream(event.name, args, chunks, event.argsHash, "recorded", boundaryFromEvent(event)));
     return;
   }
   const result = deserializeToolValue(
@@ -519,20 +628,13 @@ async function forkStoredToolEvent<TTools extends ToolHandlers>(state: ForkConte
     "result",
     state.redactor.vault.restore(event.result)
   );
-  state.child.recordServedToolResult(event.name, args, result, event.argsHash, "recorded");
+  state.child.recordServedToolResult(event.name, args, result, event.argsHash, "recorded", boundaryFromEvent(event));
 }
 
 async function consumeAsyncIterable(stream: AsyncIterable<unknown>): Promise<void> {
   for await (const _chunk of stream) {
     // Fully consume streams so RecordSession can persist the assembled event.
   }
-}
-
-function markProvenance(event: RewindEvent, provenance: EventProvenance): RewindEvent {
-  if (event.kind === "model_call" || event.kind === "tool_call" || event.kind === "entropy") {
-    return { ...event, provenance };
-  }
-  return event;
 }
 
 function valueFromModelEvent(event: ModelCallEvent, redactor: Redactor): unknown {
@@ -542,12 +644,6 @@ function valueFromModelEvent(event: ModelCallEvent, redactor: Redactor): unknown
   }
   const restored = redactor.vault.restore(event.response);
   return restored?.raw ?? restored;
-}
-
-async function* replayToolStream(chunks: { data: unknown }[]): AsyncIterable<unknown> {
-  for (const chunk of chunks) {
-    yield chunk.data;
-  }
 }
 
 async function* finalizeStream(stream: AsyncIterable<unknown>, finish: () => void): AsyncIterable<unknown> {

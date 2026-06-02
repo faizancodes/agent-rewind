@@ -590,6 +590,11 @@ Provider credentials are read from environment variables: `OPENAI_API_KEY`,
 when auto-detection is not specific enough. Add `--dry-run` to verify the fork
 point and provider setup without spending tokens.
 
+Successful forks write a normal child session next to the parent. The child
+contains the recorded prefix boundaries with `provenance: "recorded"` and the
+new tail boundaries with `provenance: "live"` or `provenance: "stub"`, so
+`agentrewind inspect <child>` shows the complete forked trajectory.
+
 ## Forking
 
 Forking replays the prefix of a session and sends the tail live. Use it to test
@@ -607,8 +612,10 @@ agentrewind inspect .rewind/<child-session-id>
 ```
 
 The command writes a child session next to the parent and prints follow-up
-`inspect` / `context` commands. Use the SDK API when the fork needs your current
-harness code, a custom goal predicate, or custom tool policy:
+`inspect` / `context` commands. The child is replayable like any other session:
+prefix tool/model/entropy boundaries are served from the parent recording, and
+only the forked tail represents new live work. Use the SDK API when the fork
+needs your current harness code, a custom goal predicate, or custom tool policy:
 
 ```ts
 const replay = await AgentRewind.replay(".rewind/openai-demo", { codec });
@@ -635,6 +642,14 @@ splitting is best-effort because concurrent lanes are only partially ordered.
 Pass `harness` when you want the fork to execute your current agent code. If
 omitted, fork reuses the last harness passed to `replay.run()`, or falls back to
 walking stored events for simple live-tail experiments.
+
+Fork child sessions persist both sides of the split. That means a child created
+from a model step after a tool call can be strictly replayed with a full
+matching harness: the prefix tool call is served from the child recording, then
+the forked model result is served from the child recording. If the fork changed
+the prompt or model request, replay the child with the updated harness code that
+now builds that request. `fork.tokensSpent` only counts live tail model calls
+made while creating the fork.
 
 Provider-specific fork coverage lives in the codec packages. The deterministic
 suite verifies OpenAI Chat Completions, Anthropic Messages, and OpenRouter Chat

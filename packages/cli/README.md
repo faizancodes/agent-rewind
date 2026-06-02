@@ -89,7 +89,10 @@ arw inspect <session>
   providers are `openai`, `openai-compatible`, `openrouter`, and `anthropic`.
   API keys are read from `OPENAI_API_KEY`, `COMPATIBLE_API_KEY`,
   `OPENROUTER_API_KEY`, or `ANTHROPIC_API_KEY`; generic compatible endpoints
-  also need `COMPATIBLE_BASE_URL` or `--base-url`.
+  also need `COMPATIBLE_BASE_URL` or `--base-url`. Successful forks write a
+  complete child session: recorded prefix boundaries keep
+  `provenance=recorded`, live tail model calls get `provenance=live`, and the
+  child can be inspected or replayed as one complete trajectory.
 - `tool` prints a readable recorded tool call by default. Add `--json` for
   `args`, `result`, `error`, stream chunks, latency, and provenance as JSON.
   Use `--name` when the tool appears once, or `--step` after `inspect` when a

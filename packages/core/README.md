@@ -39,7 +39,8 @@ Core exports:
   client shape.
 - `assertProviderCodec()` and `assertCodecConformance()` for failing fast when
   a custom codec is incomplete or cannot normalize/store/rebuild fixtures.
-- `Replay.fork()` for replay-prefix/live-tail forking.
+- `Replay.fork()` for replay-prefix/live-tail forking that writes complete child
+  sessions.
 - `defineTools()` for preserving tool argument/result types in `ctx.tools`.
 - `defineHarness()` for preserving harness return types and tool-aware
   `ctx.tools` types without manual generic annotations.
@@ -163,9 +164,16 @@ Prefer `Replay.fork({ atStep, harness, model })` when you want the fork to run
 your current agent code. If `harness` is omitted, fork reuses the last harness
 passed to `Replay.run()` when one is available. If a replay is freshly loaded
 and no harness has been run, fork falls back to a stored-event tail walk: prefix
-boundary events are served into the trace, tail model calls go live through the
-supplied model client, and matching tail tools are recorded into the child as
-`provenance: "recorded"`.
+boundary events are persisted into the child as `provenance: "recorded"`, tail
+model calls go live through the supplied model client, and matching tail tools
+are recorded into the child as `provenance: "recorded"`.
+
+The resulting child is a normal replayable session. It contains the recorded
+prefix plus the forked live/stub tail, so a child created from a model step
+after a tool call can replay with a full matching harness instead of needing a
+tail-only harness. If the fork changed a prompt or model request, replay the
+child with the updated harness code that now produces that forked tail request.
+`fork.tokensSpent` only counts live tail model calls.
 
 `atStep` follows the same linearized boundary-event steps returned by
 `events()` and printed by the CLI. Splitting inside concurrent work is

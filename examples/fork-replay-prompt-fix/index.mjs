@@ -14,6 +14,7 @@ import { openaiChatCodec } from "../../packages/codec-openai/dist/index.js";
 // 3. Fork from the model-call step.
 // 4. Reuse the recorded prefix: entropy and tool calls are not run again.
 // 5. Send only the tail model call live with a corrected system instruction.
+// 6. Replay the forked child with the full fixed harness for CI coverage.
 //
 // Read this file when you want to answer: "Would this prompt or model change
 // have fixed a real historical agent failure?"
@@ -23,6 +24,8 @@ import { openaiChatCodec } from "../../packages/codec-openai/dist/index.js";
 // - One strict replay that proves the recording is stable.
 // - One `replay.fork({ atStep, harness, model, overrides, goal })` call that
 //   changes only the experimental tail.
+// - One child replay assertion that proves the forked session is a complete
+//   replay artifact, not a tail-only snippet.
 const codec = openaiChatCodec();
 const store = await mkdtemp(join(tmpdir(), "agentrewind-fork-replay-"));
 
@@ -39,6 +42,11 @@ let recordModelCalls = 0;
 let forkModelCalls = 0;
 
 try {
+  const originalSystemPrompt =
+    "Decide refund requests from the supplied policy snapshot. Return JSON with decision, reason, and nextStep.";
+  const fixedSystemPrompt =
+    "Decide refund requests from the supplied policy snapshot. Enterprise renewals inside the exception window must use the enterpriseExceptionAction. Return JSON with decision, reason, and nextStep.";
+
   const tools = {
     // This tool stands in for a policy database or config service. In a real
     // incident, the historical policy snapshot matters: you do not want today's
@@ -55,7 +63,7 @@ try {
     }
   };
 
-  const harness = async (ctx) => {
+  const createHarness = (systemPrompt) => async (ctx) => {
     // The harness is intentionally the same for record, replay, and fork. A fork
     // should change the request through explicit overrides, not by changing the
     // historical input-building code.
@@ -81,8 +89,7 @@ try {
         messages: [
           {
             role: "system",
-            content:
-              "Decide refund requests from the supplied policy snapshot. Return JSON with decision, reason, and nextStep."
+            content: systemPrompt
           },
           {
             role: "user",
@@ -100,6 +107,8 @@ try {
 
     return JSON.parse(completion.choices[0].message.content);
   };
+  const harness = createHarness(originalSystemPrompt);
+  const fixedHarness = createHarness(fixedSystemPrompt);
 
   // Recording creates the baseline session. In a production workflow this
   // session might come from a failing CI test, a production incident capture, or
@@ -189,8 +198,7 @@ try {
       //
       // For OpenAI Chat Completions, the codec maps `overrides.system` onto the
       // system message in the request before the live tail call is made.
-      system:
-        "Decide refund requests from the supplied policy snapshot. Enterprise renewals inside the exception window must use the enterpriseExceptionAction. Return JSON with decision, reason, and nextStep."
+      system: fixedSystemPrompt
     },
     // The goal converts the fork from a manual experiment into an assertion.
     // A CI test can fail if the prompt change stops producing the desired
@@ -202,7 +210,8 @@ try {
   });
 
   // After the fork, inspect the child trace rather than the parent replay. The
-  // child trace contains the live tail events created by the prompt experiment.
+  // child trace contains the recorded prefix plus the live tail events created
+  // by the prompt experiment.
   // The fork result contains a trace for the child session. Reading the model
   // event from that trace lets the example report what the changed prompt did.
   const forkedDecision = fork.trace
@@ -210,6 +219,17 @@ try {
     .filter((event) => event.kind === "model_call")
     .map(modelEventJson)
     .find((decision) => decision?.decision === "escalate-to-csm");
+
+  // Step 3: replay the child session.
+  //
+  // The child session is what you would keep as a regression fixture. It
+  // contains the recorded prefix from the parent plus the forked live tail. To
+  // turn the fork into a regression test, replay the child with the full fixed
+  // harness that now builds the corrected prompt. Notice that no tools or model
+  // clients are passed here: strict replay should serve the recorded policy
+  // lookup and the forked model result from the child session.
+  const childReplay = await AgentRewind.replay(join(store, fork.sessionId), { codec });
+  const replayedFork = await childReplay.run(fixedHarness);
 
   if (recorded.decision !== "deny") {
     throw new Error("The recording did not capture the expected bad refund decision");
@@ -220,9 +240,12 @@ try {
   if (!fork.reachedGoal || !forkedDecision) {
     throw new Error("Fork did not reach the corrected refund decision");
   }
+  if (JSON.stringify(replayedFork) !== JSON.stringify(forkedDecision)) {
+    throw new Error("Child replay did not reproduce the forked refund decision");
+  }
   // This is the key safety assertion for forked replays: the historical policy
-  // lookup was not repeated, but the fork did make one new model call for the
-  // changed tail.
+  // lookup was not repeated during replay, fork, or child replay, but the fork
+  // did make one new model call for the changed tail.
   if (liveToolCalls !== 1) {
     throw new Error(`Expected the policy tool to run only during recording, got ${liveToolCalls}`);
   }
@@ -240,7 +263,9 @@ try {
         recorded,
         replayed,
         forkedDecision,
+        replayedFork,
         forkStartedAtStep: modelStep,
+        forkSessionId: fork.sessionId,
         liveToolCalls,
         recordModelCalls,
         forkModelCalls,

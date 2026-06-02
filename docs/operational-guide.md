@@ -162,8 +162,11 @@ agentrewind fork .rewind/support-bot \
 ```
 
 The fork command creates a child session and prints the follow-up `inspect` and
-`context` commands. It reads provider keys from environment variables, so keep
-keys outside shell history by using env vars instead of command-line flags.
+`context` commands. The child session contains the recorded prefix and the
+forked tail, with provenance marking which boundaries were served from the
+parent recording and which ones were live. It reads provider keys from
+environment variables, so keep keys outside shell history by using env vars
+instead of command-line flags.
 
 Use the SDK when the fork needs current harness code or a goal predicate:
 
@@ -183,5 +186,8 @@ const fork = await replay.fork({
 });
 ```
 
-`fork.tokensSpent` only counts live tail model usage. Tail events are written to
-a child session whose metadata points back to the parent recording.
+`fork.tokensSpent` only counts live tail model usage. The child session metadata
+points back to the parent recording, and the child can be strictly replayed with
+the full matching harness when the same recorded prefix tools and agent code
+shape are available. For prompt/model fixes, that usually means the updated
+harness code now builds the request that the fork tested.

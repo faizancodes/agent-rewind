@@ -1878,9 +1878,96 @@ describe("AgentRewind core", () => {
     expect(result.reachedGoal).toBe(true);
     expect(result.tokensSpent).toEqual({ inputTokens: 0, outputTokens: 0 });
     const childReplay = await AgentRewind.replay(join(store, result.sessionId), { codec });
-    await childReplay.run(async (ctx) => {
-      await ctx.tools.known!({ id: 1 });
+    await childReplay.run(harness);
+  });
+
+  it("fork child sessions persist recorded tool prefixes so the full harness replays", async () => {
+    const store = await tempStore();
+    let toolCalls = 0;
+    const tools = defineTools({
+      lookup: async (args: { id: number }) => {
+        toolCalls += 1;
+        return { id: args.id, route: "recorded-prefix" };
+      }
     });
+    const harness = defineHarness(tools, async (ctx) => {
+      const data = await ctx.tools.lookup({ id: 1 });
+      return ctx.model.create(req(`route:${data.route}`), { site: "decision" });
+    });
+    const agent = defineAgent({ tools, harness });
+    const record = AgentRewind.record({
+      id: "fork-child-full-harness",
+      store,
+      model: fakeModel([{ content: "old", usage: usage(1, 1) }]),
+      tools,
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+    expect(toolCalls).toBe(1);
+
+    const replay = await AgentRewind.replay(join(store, "fork-child-full-harness"), { codec, tools });
+    await replay.run(harness);
+    expect(toolCalls).toBe(1);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const result = await replay.fork({
+      atStep: modelStep,
+      harness,
+      model: fakeModel([{ content: "new", usage: usage(2, 3) }])
+    });
+    expect(toolCalls).toBe(1);
+
+    const child = await readSession(join(store, result.sessionId));
+    expect(child.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "tool_call", name: "lookup", provenance: "recorded" }),
+        expect.objectContaining({ kind: "model_call", provenance: "live" })
+      ])
+    );
+
+    const childReplay = await AgentRewind.replay(join(store, result.sessionId), { codec, tools });
+    await expect(childReplay.run(agent.harness)).resolves.toMatchObject({ content: "new" });
+    expect(toolCalls).toBe(1);
+  });
+
+  it("fork child sessions preserve recorded prefix entropy lanes so the full harness replays", async () => {
+    const store = await tempStore();
+    const runtime = { uuid: () => "run-fixed", now: () => 1234, random: () => 0.5 };
+    const harness = defineHarness(async (ctx) => {
+      const runId = ctx.uuid();
+      const observedAt = ctx.clock();
+      return ctx.model.create(req(`run:${runId}:at:${observedAt}`), { site: "decision" });
+    });
+    const record = AgentRewind.record({
+      id: "fork-child-entropy-prefix",
+      store,
+      model: fakeModel([{ content: "old", usage: usage(1, 1) }]),
+      codec,
+      runtime
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "fork-child-entropy-prefix"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const result = await replay.fork({
+      atStep: modelStep,
+      harness,
+      model: fakeModel([{ content: "new", usage: usage(2, 3) }])
+    });
+
+    const child = await readSession(join(store, result.sessionId));
+    expect(child.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "entropy", source: "uuid", provenance: "recorded", lane: "0.1" }),
+        expect.objectContaining({ kind: "entropy", source: "clock", provenance: "recorded", lane: "0.1" }),
+        expect.objectContaining({ kind: "model_call", provenance: "live" })
+      ])
+    );
+
+    const childReplay = await AgentRewind.replay(join(store, result.sessionId), { codec });
+    await expect(childReplay.run(harness)).resolves.toMatchObject({ content: "new" });
   });
 
   it("fork tool onMiss='stub' tags the tail event with stub provenance", async () => {

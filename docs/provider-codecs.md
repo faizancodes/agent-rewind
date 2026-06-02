@@ -43,6 +43,13 @@ OpenRouter. They assert that fork tail calls go through the provider's real SDK
 method path, preserve provider-specific parameters, record a child session with
 the right provider identity, and can replay the child session afterward.
 
+Fork child sessions are complete session artifacts. Prefix model, tool, and
+entropy boundaries are persisted into the child with `provenance: "recorded"`;
+new tail model calls are persisted with `provenance: "live"` and token usage is
+counted only for those live tail calls. This is why a child fork created after a
+recorded tool call can be replayed later with a full harness that still starts
+from the original prefix and now produces the forked tail request.
+
 Run the deterministic provider fork suite with:
 
 ```sh

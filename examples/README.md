@@ -39,13 +39,16 @@ code becomes replayable.
 If you specifically want to understand forking, read
 `fork-replay-prompt-fix/index.mjs` first. That file is the dedicated forking
 replay example: it records a bad run, strictly replays it, then forks at the
-model-call step so only the changed tail calls a live model.
+model-call step so only the changed tail calls a live model. It also replays
+the forked child session with the full fixed harness, which is the pattern to
+copy for regression tests.
 
 The shortest mental model for a forked replay is:
 
 - Replay the recorded prefix exactly as it happened.
 - Stop at the recorded step you want to experiment with.
 - Run the tail live with explicit changes, such as a new system prompt or model.
+- Save a child session that contains both the recorded prefix and the new tail.
 - Assert that the fork reached the behavior you wanted.
 
 ## `sample-agent`
@@ -79,6 +82,7 @@ This is the clearest fork-specific example:
 - Reuse the recorded prefix, including UUID and policy lookup.
 - Send only the tail model call live with an overridden system instruction.
 - Assert the fork reaches the corrected decision.
+- Replay the forked child with the full fixed harness to prove it is CI-ready.
 
 Use this when you need to evaluate prompt/model changes against a real recorded
 agent run without rerunning earlier tools or manually rebuilding context.

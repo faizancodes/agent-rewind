@@ -1,8 +1,12 @@
 import type {
+  BaseEvent,
+  ChunkRecord,
   EntropyEvent,
   EventProvenance,
   FingerprintMode,
   ModelCallEvent,
+  NormalizedRequest,
+  NormalizedResponse,
   NoteEvent,
   RewindEvent,
   SessionEndEvent,
@@ -26,13 +30,14 @@ import {
 } from "./session-store.js";
 import { serializeToolValue, type ToolSerializers } from "./tool-serialization.js";
 import { LaneManager, deriveCallSite } from "./context.js";
-import { CodecError, ConfigurationError, PurityLintError } from "./errors.js";
+import { CodecError, ConfigurationError, PurityLintError, RewindError } from "./errors.js";
 import { PurityLint } from "./purity-lint.js";
 
 export type ToolHandler<Args = unknown, Result = unknown> = (args: Args) => Result | Promise<Result> | AsyncIterable<Result>;
 export type ToolHandlers = Record<string, ToolHandler<never, unknown>>;
 export type UntypedToolHandlers = Record<string, ToolHandler<unknown, unknown>>;
 type CallableToolHandler = (args: unknown) => unknown | Promise<unknown> | AsyncIterable<unknown>;
+export type BoundarySeed = Pick<BaseEvent, "step" | "seq" | "ts" | "lane" | "callSite" | "schemaVersion">;
 type RuntimeEntropySource = Exclude<EntropyEvent["source"], "env">;
 export type InterceptPurpose = "create" | "stream";
 
@@ -350,8 +355,8 @@ export class RecordSession<
     this.eventsBuffer.push(event);
   }
 
-  recordStubTool(name: string, args: unknown, result: unknown, argsHash: string): void {
-    const initiated = this.beginBoundary("tool_call", name);
+  recordStubTool(name: string, args: unknown, result: unknown, argsHash: string, boundary?: BoundarySeed): void {
+    const { initiated, finish } = this.beginOrUseBoundary("tool_call", name, boundary);
     try {
       const serializedArgs = serializeToolValue(this.opts.toolSerializers, name, "args", args, `tool.${name}.args`);
       const serializedResult = serializeToolValue(this.opts.toolSerializers, name, "result", result, `tool.${name}.result`);
@@ -367,7 +372,7 @@ export class RecordSession<
         provenance: "stub"
       });
     } finally {
-      this.lanes.endBoundaryLane(initiated.lane);
+      finish();
     }
   }
 
@@ -376,9 +381,10 @@ export class RecordSession<
     args: unknown,
     result: unknown,
     argsHash: string,
-    provenance: EventProvenance = "recorded"
+    provenance: EventProvenance = "recorded",
+    boundary?: BoundarySeed
   ): void {
-    const initiated = this.beginBoundary("tool_call", name);
+    const { initiated, finish } = this.beginOrUseBoundary("tool_call", name, boundary);
     try {
       const serializedArgs = serializeToolValue(this.opts.toolSerializers, name, "args", args, `tool.${name}.args`);
       const serializedResult = serializeToolValue(this.opts.toolSerializers, name, "result", result, `tool.${name}.result`);
@@ -394,7 +400,7 @@ export class RecordSession<
         provenance
       });
     } finally {
-      this.lanes.endBoundaryLane(initiated.lane);
+      finish();
     }
   }
 
@@ -403,9 +409,10 @@ export class RecordSession<
     args: unknown,
     argsHash: string,
     error: ToolCallEvent["error"],
-    provenance: EventProvenance = "recorded"
+    provenance: EventProvenance = "recorded",
+    boundary?: BoundarySeed
   ): void {
-    const initiated = this.beginBoundary("tool_call", name);
+    const { initiated, finish } = this.beginOrUseBoundary("tool_call", name, boundary);
     try {
       const serializedArgs = serializeToolValue(this.opts.toolSerializers, name, "args", args, `tool.${name}.args`);
       this.append({
@@ -420,7 +427,7 @@ export class RecordSession<
         provenance
       });
     } finally {
-      this.lanes.endBoundaryLane(initiated.lane);
+      finish();
     }
   }
 
@@ -429,9 +436,10 @@ export class RecordSession<
     args: unknown,
     chunks: { offsetMs: number; data: unknown }[],
     argsHash: string,
-    provenance: EventProvenance = "recorded"
+    provenance: EventProvenance = "recorded",
+    boundary?: BoundarySeed
   ): AsyncIterable<unknown> {
-    const initiated = this.beginBoundary("tool_call", name);
+    const { initiated, finish } = this.beginOrUseBoundary("tool_call", name, boundary);
     const serializedArgs = serializeToolValue(this.opts.toolSerializers, name, "args", args, `tool.${name}.args`);
     const storedArgs = this.redactor.redactDeep(serializedArgs);
     const self = this;
@@ -469,10 +477,138 @@ export class RecordSession<
           throw error;
         } finally {
           persist();
-          self.lanes.endBoundaryLane(initiated.lane);
+          finish();
         }
       }
     };
+  }
+
+  recordServedModelResult(
+    normalizedRequest: NormalizedRequest,
+    response: NormalizedResponse | undefined,
+    site: string | undefined,
+    provenance: EventProvenance = "recorded",
+    callSite?: string,
+    boundary?: BoundarySeed
+  ): void {
+    const { initiated, finish } = this.beginOrUseBoundary("model_call", site, boundary);
+    try {
+      const usage = response ? (this.codec.extractUsage(response) ?? response.usage) : undefined;
+      this.append({
+        ...initiated,
+        ...(callSite && !boundary ? { callSite } : {}),
+        kind: "model_call",
+        provider: this.codec.name,
+        request: this.redactor.redactDeep(normalizedRequest),
+        requestHash: fingerprint(normalizedRequest, this.codec, this.redactor, this.fingerprintMode),
+        ...(response === undefined ? {} : { response: this.redactor.redactDeep(response) }),
+        ...(usage === undefined ? {} : { usage }),
+        latencyMs: 0,
+        blobs: {},
+        provenance
+      });
+    } finally {
+      finish();
+    }
+  }
+
+  recordServedModelError(
+    normalizedRequest: NormalizedRequest,
+    error: SerializedError,
+    site: string | undefined,
+    provenance: EventProvenance = "recorded",
+    callSite?: string,
+    boundary?: BoundarySeed
+  ): void {
+    const { initiated, finish } = this.beginOrUseBoundary("model_call", site, boundary);
+    try {
+      this.append({
+        ...initiated,
+        ...(callSite && !boundary ? { callSite } : {}),
+        kind: "model_call",
+        provider: this.codec.name,
+        request: this.redactor.redactDeep(normalizedRequest),
+        requestHash: fingerprint(normalizedRequest, this.codec, this.redactor, this.fingerprintMode),
+        error: this.redactor.redactDeep(error),
+        latencyMs: 0,
+        blobs: {},
+        provenance
+      });
+    } finally {
+      finish();
+    }
+  }
+
+  recordServedModelStream(
+    normalizedRequest: NormalizedRequest,
+    chunks: ChunkRecord[],
+    response: NormalizedResponse | undefined,
+    error: SerializedError | undefined,
+    site: string | undefined,
+    provenance: EventProvenance = "recorded",
+    callSite?: string,
+    boundary?: BoundarySeed
+  ): AsyncIterable<unknown> {
+    const { initiated, finish } = this.beginOrUseBoundary("model_call", site, boundary);
+    const requestHash = fingerprint(normalizedRequest, this.codec, this.redactor, this.fingerprintMode);
+    const storedRequest = this.redactor.redactDeep(normalizedRequest);
+    const self = this;
+    return {
+      async *[Symbol.asyncIterator]() {
+        let persisted = false;
+        const persist = () => {
+          if (persisted) {
+            return;
+          }
+          persisted = true;
+          const usage = response ? (self.codec.extractUsage(response) ?? response.usage) : undefined;
+          self.append({
+            ...initiated,
+            ...(callSite && !boundary ? { callSite } : {}),
+            kind: "model_call",
+            provider: self.codec.name,
+            request: storedRequest,
+            requestHash,
+            ...(response === undefined ? {} : { response: self.redactor.redactDeep(response) }),
+            stream: self.redactor.redactDeep(chunks),
+            ...(usage === undefined ? {} : { usage }),
+            ...(error === undefined ? {} : { error: self.redactor.redactDeep(error) }),
+            latencyMs: 0,
+            blobs: {},
+            provenance
+          });
+        };
+        try {
+          if (error && chunks.length === 0) {
+            throw new RewindError(error.message, error.data);
+          }
+          for await (const chunk of self.codec.rebuildStream(chunks)) {
+            yield chunk;
+          }
+          if (error) {
+            throw new RewindError(error.message, error.data);
+          }
+        } finally {
+          persist();
+          finish();
+        }
+      }
+    };
+  }
+
+  recordServedEntropy(source: Exclude<EntropyEvent["source"], "env">, value: number | string, provenance?: EventProvenance): number | string;
+  recordServedEntropy(source: Exclude<EntropyEvent["source"], "env">, value: number | string, provenance: EventProvenance, boundary: BoundarySeed): number | string;
+  recordServedEntropy(source: "env", value: string | null, provenance: EventProvenance, key: string, boundary?: BoundarySeed): string | null;
+  recordServedEntropy(
+    source: EntropyEvent["source"],
+    value: number | string | null,
+    provenance: EventProvenance = "recorded",
+    keyOrBoundary?: string | BoundarySeed,
+    boundary?: BoundarySeed
+  ): number | string | null {
+    const key = typeof keyOrBoundary === "string" ? keyOrBoundary : undefined;
+    const boundarySeed = typeof keyOrBoundary === "object" ? keyOrBoundary : boundary;
+    return this.recordEntropy(source, value, provenance, key, boundarySeed);
   }
 
   async recordLiveModel(
@@ -480,36 +616,38 @@ export class RecordSession<
     liveClient: unknown,
     site: string | undefined,
     provenance: EventProvenance = "live",
-    requestOverride?: TRequest
+    requestOverride?: TRequest,
+    boundary?: BoundarySeed
   ): Promise<unknown> {
-    return this.recordModelCreate(liveClient, rawRequest, site, provenance, requestOverride);
+    return this.recordModelCreate(liveClient, rawRequest, site, provenance, requestOverride, boundary);
   }
 
   recordLiveModelStream(
     rawRequest: TRequest,
     liveClient: unknown,
     site: string | undefined,
-    provenance: EventProvenance = "live"
+    provenance: EventProvenance = "live",
+    boundary?: BoundarySeed
   ): AsyncIterable<unknown> {
-    return this.recordModelStream(liveClient, rawRequest, site, provenance);
+    return this.recordModelStream(liveClient, rawRequest, site, provenance, boundary);
   }
 
-  recordLiveEntropy(source: "clock", provenance?: EventProvenance): number;
-  recordLiveEntropy(source: "random", provenance?: EventProvenance): number;
-  recordLiveEntropy(source: "uuid", provenance?: EventProvenance): string;
-  recordLiveEntropy(source: RuntimeEntropySource, provenance?: EventProvenance): number | string;
-  recordLiveEntropy(source: RuntimeEntropySource, provenance: EventProvenance = "live"): number | string {
+  recordLiveEntropy(source: "clock", provenance?: EventProvenance, boundary?: BoundarySeed): number;
+  recordLiveEntropy(source: "random", provenance?: EventProvenance, boundary?: BoundarySeed): number;
+  recordLiveEntropy(source: "uuid", provenance?: EventProvenance, boundary?: BoundarySeed): string;
+  recordLiveEntropy(source: RuntimeEntropySource, provenance?: EventProvenance, boundary?: BoundarySeed): number | string;
+  recordLiveEntropy(source: RuntimeEntropySource, provenance: EventProvenance = "live", boundary?: BoundarySeed): number | string {
     const value =
       source === "clock"
         ? this.runtime.now()
         : source === "random"
           ? this.runtime.random()
           : this.runtime.uuid();
-    return this.recordEntropy(source, value, provenance) as number | string;
+    return this.recordEntropy(source, value, provenance, undefined, boundary) as number | string;
   }
 
-  recordEnv(key: string, value: string | undefined, provenance: EventProvenance = "live"): string | undefined {
-    const recorded = this.recordEntropy("env", value ?? null, provenance, key);
+  recordEnv(key: string, value: string | undefined, provenance: EventProvenance = "live", boundary?: BoundarySeed): string | undefined {
+    const recorded = this.recordEntropy("env", value ?? null, provenance, key, boundary);
     return recorded === null ? undefined : String(recorded);
   }
 
@@ -533,9 +671,10 @@ export class RecordSession<
     rawRequest: TRequest,
     site: string | undefined,
     provenance: EventProvenance = "live",
-    requestOverride?: TRequest
+    requestOverride?: TRequest,
+    boundary?: BoundarySeed
   ): Promise<unknown> {
-    const initiated = this.beginBoundary("model_call", site);
+    const { initiated, finish } = this.beginOrUseBoundary("model_call", site, boundary);
     const normalizedRequest = this.codec.normalizeRequest(rawRequest);
     const requestHash = fingerprint(normalizedRequest, this.codec, this.redactor, this.fingerprintMode);
     const storedRequest = this.redactor.redactDeep(normalizedRequest);
@@ -574,7 +713,7 @@ export class RecordSession<
         });
         throw error;
       } finally {
-        this.lanes.endBoundaryLane(initiated.lane);
+        finish();
       }
     });
   }
@@ -583,9 +722,10 @@ export class RecordSession<
     client: unknown,
     rawRequest: TRequest,
     site: string | undefined,
-    provenance: EventProvenance = "live"
+    provenance: EventProvenance = "live",
+    boundary?: BoundarySeed
   ): AsyncIterable<unknown> {
-    const initiated = this.beginBoundary("model_call", site);
+    const { initiated, finish } = this.beginOrUseBoundary("model_call", site, boundary);
     const normalizedRequest = this.codec.normalizeRequest(rawRequest);
     const requestHash = fingerprint(normalizedRequest, this.codec, this.redactor, this.fingerprintMode);
     const storedRequest = this.redactor.redactDeep(normalizedRequest);
@@ -658,7 +798,7 @@ export class RecordSession<
           throw error;
         } finally {
           persistPartial();
-          self.lanes.endBoundaryLane(initiated.lane);
+          finish();
         }
       }
     };
@@ -787,24 +927,25 @@ export class RecordSession<
     };
   }
 
-  private recordEntropy(source: "clock", value: number, provenance?: EventProvenance): number;
-  private recordEntropy(source: "random", value: number, provenance?: EventProvenance): number;
-  private recordEntropy(source: "uuid", value: string, provenance?: EventProvenance): string;
-  private recordEntropy(source: "env", value: string | null, provenance: EventProvenance, key: string): string | null;
-  private recordEntropy(source: EntropyEvent["source"], value: number | string | null, provenance?: EventProvenance, key?: string): number | string | null;
+  private recordEntropy(source: "clock", value: number, provenance?: EventProvenance, key?: undefined, boundary?: BoundarySeed): number;
+  private recordEntropy(source: "random", value: number, provenance?: EventProvenance, key?: undefined, boundary?: BoundarySeed): number;
+  private recordEntropy(source: "uuid", value: string, provenance?: EventProvenance, key?: undefined, boundary?: BoundarySeed): string;
+  private recordEntropy(source: "env", value: string | null, provenance: EventProvenance, key: string, boundary?: BoundarySeed): string | null;
+  private recordEntropy(source: EntropyEvent["source"], value: number | string | null, provenance?: EventProvenance, key?: string, boundary?: BoundarySeed): number | string | null;
   private recordEntropy(
     source: EntropyEvent["source"],
     value: number | string | null,
     provenance: EventProvenance = "live",
-    key?: string
+    key?: string,
+    boundary?: BoundarySeed
   ): number | string | null {
     const explicit = source === "env" && key ? `env:${key}` : source;
-    const initiated = this.beginBoundary("entropy", explicit);
+    const { initiated, finish } = this.beginOrUseBoundary("entropy", explicit, boundary);
     try {
       this.append({ ...initiated, kind: "entropy", source, ...(key ? { key } : {}), value, provenance });
       return value;
     } finally {
-      this.lanes.endBoundaryLane(initiated.lane);
+      finish();
     }
   }
 
@@ -819,6 +960,19 @@ export class RecordSession<
       callSite: kind === "entropy" ? `${explicitSite ?? "entropy"}:${ordinal}:${explicitSite ?? "entropy"}` : deriveCallSite(explicitSite, kind, lane, ordinal),
       schemaVersion: CURRENT_SCHEMA_VERSION
     };
+  }
+
+  private beginOrUseBoundary(
+    kind: "model_call" | "tool_call" | "entropy",
+    explicitSite: string | undefined,
+    boundary?: BoundarySeed
+  ): { initiated: BoundarySeed; finish: () => void } {
+    if (boundary) {
+      this.lanes.setNextStep(Math.max(this.lanes.lastStep() + 1, boundary.step + 1));
+      return { initiated: boundary, finish: () => undefined };
+    }
+    const initiated = this.beginBoundary(kind, explicitSite);
+    return { initiated, finish: () => this.lanes.endBoundaryLane(initiated.lane) };
   }
 
   private baseEvent(kind: RewindEvent["kind"], callSite: string, ordinalKey: string): Omit<RewindEvent, "kind"> {

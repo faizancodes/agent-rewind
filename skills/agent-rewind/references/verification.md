@@ -171,6 +171,11 @@ For each provider smoke test:
 - Usage is present when the provider returns it.
 - Fork dry run succeeds for the recorded model-call step.
 - A live fork succeeds only when intentionally spending provider tokens.
+- The forked child session contains recorded prefix boundaries plus live tail
+  boundaries.
+- The forked child replays with the full matching harness, and prefix tools are
+  not called again. For prompt fixes, the matching harness includes the updated
+  prompt code that the fork tested.
 - The response prefix can be printed, but never print keys or full env.
 
 For OpenRouter first-class support, test both create and stream when possible:

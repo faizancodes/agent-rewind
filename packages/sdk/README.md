@@ -47,6 +47,12 @@ const prompt = await AgentRewind.promptContext("latest", {
 });
 ```
 
+Forked child sessions created through the SDK or CLI are complete replay
+artifacts. They keep the recorded prefix in the child session and append the
+forked live tail, which lets you replay the child later with the same full
+harness shape and the updated prompt/model code when turning a fork into a
+regression test.
+
 See the repository README for the full record, replay, fork, redaction, CLI,
 and examples guide.
 

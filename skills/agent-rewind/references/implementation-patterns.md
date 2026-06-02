@@ -181,6 +181,13 @@ agentrewind fork latest \
 
 Dry runs verify the fork plan without provider tokens. Add `--check-provider` when you want dry run to validate credentials and provider wiring. Built-in CLI providers are `openai`, `openai-compatible`, `openrouter`, and `anthropic`.
 
+A successful fork writes a complete child session. Prefix model, tool, and
+entropy events are copied into the child with `provenance: "recorded"`; live
+tail model calls are written with `provenance: "live"`. That child should replay
+with a full matching harness when the fork is used as a regression test. For a
+prompt fix, that means the harness code now builds the prompt that the fork
+tested.
+
 Use SDK fork when you need the current harness, a goal predicate, or programmatic assertions:
 
 ```ts
@@ -202,6 +209,9 @@ const fork = await replay.fork({
 });
 
 console.log(fork.sessionId, fork.reachedGoal, fork.tokensSpent);
+
+const childReplay = await rewind.replay(fork.sessionId);
+await childReplay.run(agent.harness);
 ```
 
 Supported fork tool policy is intentionally narrow:

@@ -285,6 +285,8 @@ The normal fork workflow is:
 4. For harness-aware experiments, call `replay.fork({ atStep, harness, model, overrides, goal })`.
 5. Assert `fork.reachedGoal`, inspect `fork.trace.events()`, and check
    `fork.tokensSpent`.
+6. Replay the child session with the full harness that now produces the forked
+   tail request when the fork becomes a regression test.
 
 CLI example:
 
@@ -297,9 +299,12 @@ agentrewind fork latest \
 ```
 
 The CLI writes a child session next to the parent and prints the next
-`inspect` / `context` commands. It uses `OPENAI_API_KEY`, `OPENROUTER_API_KEY`,
-`ANTHROPIC_API_KEY`, or `COMPATIBLE_API_KEY` plus `COMPATIBLE_BASE_URL`
-depending on the provider. Add `--dry-run` first when you want to confirm the
-step and provider without making a live model call.
+`inspect` / `context` commands. That child session contains the recorded prefix
+with `provenance: "recorded"` plus the new fork tail with live or stub
+provenance, so it can be replayed as a complete scenario instead of a tail-only
+fragment. It uses `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,
+or `COMPATIBLE_API_KEY` plus `COMPATIBLE_BASE_URL` depending on the provider.
+Add `--dry-run` first when you want to confirm the step and provider without
+making a live model call.
 
 See `examples/fork-replay-prompt-fix` for a copyable script.
