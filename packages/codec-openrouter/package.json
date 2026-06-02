@@ -1,6 +1,6 @@
 {
   "name": "@agentrewind/codec-openrouter",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "OpenRouter Chat Completions codec and OpenAI SDK client helpers for AgentRewind.",
   "type": "module",
   "keywords": [

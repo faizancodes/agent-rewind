@@ -1,6 +1,6 @@
 {
   "name": "@agentrewind/test",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "AgentRewind test helpers for asserting recorded replay sessions.",
   "type": "module",
   "keywords": [

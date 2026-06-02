@@ -1,6 +1,6 @@
 {
   "name": "@agentrewind/sdk",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Umbrella package for recording, replaying, inspecting, and forking LLM-agent runs.",
   "type": "module",
   "keywords": [

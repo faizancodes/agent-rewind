@@ -1,6 +1,6 @@
 {
   "name": "@agentrewind/codec-openai",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "description": "OpenAI-compatible Chat Completions codec for AgentRewind.",
   "type": "module",
   "keywords": [

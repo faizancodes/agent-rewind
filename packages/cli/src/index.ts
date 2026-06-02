@@ -38,7 +38,7 @@ import {
 
 const program = new Command();
 
-program.name("agentrewind").alias("arw").description("Inspect and package AgentRewind sessions").version("0.1.3");
+program.name("agentrewind").alias("arw").description("Inspect and package AgentRewind sessions").version("0.1.4");
 
 program
   .command("quickstart")
