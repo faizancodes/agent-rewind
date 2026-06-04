@@ -53,6 +53,43 @@ forked live tail, which lets you replay the child later with the same full
 harness shape and the updated prompt/model code when turning a fork into a
 regression test.
 
+When you want to compare several possible fixes, load a replay and search fork
+rollouts from the bad step:
+
+```ts
+import { search } from "@agentrewind/sdk";
+
+const replay = await rewind.replay(recorded.path);
+await replay.run(agent.harness);
+
+const result = await search.promptSweep(replay, {
+  atStep: 1,
+  harness: agent.harness,
+  model: rewind.model,
+  strategy: "beam",
+  onRolloutError: "continue",
+  prompts: [
+    { id: "baseline", system: "Ask for more context." },
+    { id: "escalate", system: "Escalate enterprise exceptions." }
+  ],
+  score: ({ result }) => (String(result).includes("escalate") ? 1 : 0)
+});
+
+console.log(result.best?.sessionPath);
+console.log(result.bestBranch?.meanScore);
+console.log(result.searchPath);
+```
+
+Use `search.modelSweep()`, `search.regression()`, or `search.judge()` when the
+candidate set is model IDs, regression assertions, or an LLM-as-a-judge rubric.
+
+For detailed scoring strategies, including parsed JSON decisions, tool-call
+goals, cost-adjusted scoring, multi-objective scoring, and LLM-as-a-judge
+natural-language metrics, read `docs/trajectory-scoring.md` in the repository.
+For beam search, Monte Carlo search, UCB, MCTS, AlphaZero-style PUCT, action
+depth, priors, and budget tuning, read
+`docs/trajectory-search-strategies.md`.
+
 See the repository README for the full record, replay, fork, redaction, CLI,
 and examples guide.
 
@@ -70,6 +107,7 @@ agentrewind list .rewind
 agentrewind doctor .rewind/<session-id>
 agentrewind doctor <session-id> --store .rewind
 agentrewind doctor latest --store .rewind
+agentrewind search latest --store .rewind --site summarize-customer --candidate "Escalate::Escalate enterprise exceptions." --goal-contains escalate
 agentrewind tool <session-id> --store .rewind --name lookupCustomer
 agentrewind entropy <session-id> --store .rewind --source uuid
 ```

@@ -1,11 +1,11 @@
 ---
 name: agent-rewind
-description: Add, modify, debug, verify, or publish AgentRewind deterministic record/replay/fork support in TypeScript LLM-agent codebases. Use this skill whenever the user mentions AgentRewind, @agentrewind/sdk, agent-rewind, replaying agent runs, recording LLM agent trajectories, forking prompts from a step, wrapping model/tool calls, debugging drift, provider presets for OpenAI/OpenRouter/Anthropic, npm package verification, or creating tests/smoke tests for this package.
+description: Add, modify, debug, verify, or publish AgentRewind deterministic record/replay/fork/search support in TypeScript LLM-agent codebases. Use this skill whenever the user mentions AgentRewind, @agentrewind/sdk, agent-rewind, replaying agent runs, recording LLM agent trajectories, forking prompts from a step, trajectory search, beam search, Monte Carlo, UCB, MCTS, AlphaZero-style PUCT over agent rollouts, wrapping model/tool calls, debugging drift, provider presets for OpenAI/OpenRouter/Anthropic, npm package verification, or creating tests/smoke tests for this package.
 ---
 
 # AgentRewind
 
-Use this skill to help engineers integrate AgentRewind into TypeScript agents and prove that record/replay/fork behavior works.
+Use this skill to help engineers integrate AgentRewind into TypeScript agents and prove that record/replay/fork/search behavior works.
 
 AgentRewind captures the external boundaries that make agents hard to debug:
 
@@ -13,7 +13,7 @@ AgentRewind captures the external boundaries that make agents hard to debug:
 - tool calls through `ctx.tools.*`
 - prompt-affecting entropy through `ctx.uuid()`, `ctx.clock()`, `ctx.random()`, and `ctx.env(key)`
 
-Strict replay should serve recorded boundary outputs and make zero live model or tool calls. Forking reuses a recorded prefix, then sends the tail live so prompt/model changes can be tested from the exact failed step. A forked child session must persist both pieces: recorded prefix boundaries with `provenance: "recorded"` and forked tail boundaries with live or stub provenance.
+Strict replay should serve recorded boundary outputs and make zero live model or tool calls. Forking reuses a recorded prefix, then sends the tail live so prompt/model changes can be tested from the exact failed step. Trajectory search runs and ranks multiple fork rollouts from the same step. A forked child session must persist both pieces: recorded prefix boundaries with `provenance: "recorded"` and forked tail boundaries with live or stub provenance.
 
 ## Package Surface
 
@@ -49,6 +49,13 @@ Do not import from an unscoped `agentrewind` package. `agentrewind` is the CLI c
 For exact provider setup snippets, read `references/provider-setup.md`.
 For implementation patterns, read `references/implementation-patterns.md`.
 For verification and smoke-test strategy, read `references/verification.md`.
+For trajectory-search scoring strategies, read the repository doc
+`docs/trajectory-scoring.md` when available.
+For trajectory-search strategy details, read the repository doc
+`docs/trajectory-search-strategies.md` when available.
+For common trajectory-search implementation, prefer `search.promptSweep()`,
+`search.modelSweep()`, `search.regression()`, and `search.judge()` from
+`@agentrewind/sdk` before hand-wiring actions and scorers.
 
 ## Default Integration Workflow
 
@@ -101,10 +108,11 @@ agentrewind prompt latest --store .rewind --step 3
 agentrewind tool latest --store .rewind --name lookupCustomer
 agentrewind entropy latest --store .rewind --source uuid
 agentrewind fork latest --store .rewind --site summarize-customer --system "Try the corrected policy prompt." --dry-run
+agentrewind search latest --store .rewind --site summarize-customer --candidate "Escalate::Escalate enterprise exceptions." --goal-contains escalate --dry-run
 agentrewind pack latest demo.rewind --store .rewind
 ```
 
-Use `doctor` first when a session looks suspicious. Use `inspect`/`timeline` for step numbers and filters. Use `context`/`prompt` to read the exact recorded model prompt. Use `fork --dry-run` to verify a fork plan without spending provider tokens; add `--check-provider` when you explicitly want credential/client validation during the dry run.
+Use `doctor` first when a session looks suspicious. Use `inspect`/`timeline` for step numbers and filters. Use `context`/`prompt` to read the exact recorded model prompt. Use `fork --dry-run` to verify one changed tail without spending provider tokens. Use `search --dry-run` to verify a candidate sweep before running multiple live rollouts. Add `--check-provider` when you explicitly want credential/client validation during the dry run.
 
 ## Engineering Rules
 
@@ -138,6 +146,7 @@ Before saying an integration works, verify with evidence:
 - Entropy values embedded in prompts are replayed, including `ctx.env()`.
 - CLI inspection works on a recorded session: `doctor`, `inspect`/`timeline`, `context`/`prompt`, `tool`, `entropy`, `fork --dry-run`, `pack`, and `unpack`.
 - Fork tests replay the child session with the full matching harness and prove prefix tools/entropy are served from the child recording. For prompt fixes, the matching harness should include the updated prompt code that the fork tested.
+- Search tests rank multiple fork rollouts, respect rollout/token/stop-score budgets, and replay the winning child with the full matching harness.
 - Redaction keeps key-shaped secrets out of `events.jsonl`; packed bundles exclude `vault.enc`.
 - Optional live smoke tests run only from local env vars and never print secrets.
 

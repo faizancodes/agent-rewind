@@ -300,6 +300,58 @@ export type {
 export { assertProviderClient, assertProviderCodec, defineAgent, defineHarness, defineTools } from "./record.js";
 export type { Replay, ReplayOptions, ReplayRunOptions } from "./replay.js";
 export type { ForkOptions, ForkResult, Sandbox, Trace } from "./fork.js";
+export type {
+  DefineJudgeRubricOptions,
+  JsonArray,
+  JsonObject,
+  JsonPrimitive,
+  JsonValue,
+  TrajectoryBestBranchMetric,
+  TrajectoryJudge,
+  TrajectoryJudgeCache,
+  TrajectoryJudgeCriterionResult,
+  TrajectoryJudgeInput,
+  TrajectoryJudgeOutput,
+  TrajectoryJudgeRubric,
+  TrajectoryJudgeRubricCriterion,
+  TrajectoryJudgeScorerOptions,
+  TrajectoryJudgeSearchOptions,
+  TrajectoryModelCandidate,
+  TrajectoryModelSweepOptions,
+  TrajectoryPromptCandidate,
+  TrajectoryPromptSweepOptions,
+  TrajectoryRegressionAssertion,
+  TrajectoryRegressionAssertionResult,
+  TrajectoryRegressionOptions,
+  TrajectorySearchRateLimitOptions,
+  TrajectorySearchRetryOptions,
+  TrajectorySearchRolloutEvent,
+  TrajectorySearchRunner,
+  TrajectorySearchAction,
+  TrajectorySearchActionContext,
+  TrajectorySearchBranchDiagnostic,
+  TrajectorySearchBudget,
+  TrajectorySearchDiagnostics,
+  TrajectorySearchNode,
+  TrajectorySearchOptions,
+  TrajectorySearchResult,
+  TrajectorySearchScore,
+  TrajectorySearchScoreContext,
+  TrajectorySearchStrategy,
+  TrajectorySelectionReason
+} from "./search.js";
+export {
+  createJudgeScorer,
+  createMemoryJudgeCache,
+  defineJudgeRubric,
+  judgeSearch,
+  modelSweep,
+  promptSweep,
+  regressionSearch,
+  search,
+  searchReplay,
+  toJsonValue
+} from "./search.js";
 export type { ContextDiff, TokenizerRegistry } from "./tokens.js";
 export {
   registerTokenizer,

@@ -18,6 +18,7 @@ import { deserializeToolValue, serializeToolValue, type ToolSerializers } from "
 import { diffMessages, type ContextDiff } from "./tokens.js";
 import { invokeClient, isAsyncIterable, selectInterceptPoint } from "./record.js";
 import { forkReplay, type ForkOptions, type ForkResult } from "./fork.js";
+import { searchReplay, type TrajectorySearchOptions, type TrajectorySearchResult } from "./search.js";
 
 type CallableToolHandler = (args: unknown) => unknown | Promise<unknown> | AsyncIterable<unknown>;
 
@@ -72,6 +73,8 @@ export interface Replay<
   diffContext(a: number, b: number): ContextDiff;
   /** Replay the prefix and execute the tail as a child recording. */
   fork(opts: ForkOptions<TTools, TRequest, TResponse, TStreamChunk>): Promise<ForkResult>;
+  /** Run trajectory-search fork rollouts from a recorded boundary. */
+  search<TResult = unknown>(opts: TrajectorySearchOptions<TResult, TTools, TRequest, TResponse, TStreamChunk>): Promise<TrajectorySearchResult<TResult>>;
 }
 
 export class ReplaySession<
@@ -151,6 +154,12 @@ export class ReplaySession<
 
   fork(opts: ForkOptions<TTools, TRequest, TResponse, TStreamChunk>): Promise<ForkResult> {
     return forkReplay(this, opts);
+  }
+
+  search<TResult = unknown>(
+    opts: TrajectorySearchOptions<TResult, TTools, TRequest, TResponse, TStreamChunk>
+  ): Promise<TrajectorySearchResult<TResult>> {
+    return searchReplay(this, opts);
   }
 
   requireCodec(operation: string): ProviderCodec<TRequest, TResponse, TStreamChunk> {

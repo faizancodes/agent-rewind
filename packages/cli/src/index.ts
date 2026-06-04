@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 import { anthropicCodec } from "@agentrewind/codec-anthropic";
 import { openaiChatCodec } from "@agentrewind/codec-openai";
@@ -22,9 +23,11 @@ import {
   RewindError,
   resolveSessionPath,
   summarizeSession as summarizeCoreSession,
+  toJsonValue,
   unpackSession,
   type EntropyEvent,
   type ForkOverrides,
+  type JsonValue,
   type ModelCallEvent,
   type NormalizedMessage,
   type ProviderCodec,
@@ -33,10 +36,20 @@ import {
   type SessionSummary,
   type SessionTimelineRow,
   type ToolCallEvent,
+  type TrajectoryBestBranchMetric,
+  type TrajectorySearchAction,
+  type TrajectorySearchNode,
+  type TrajectorySearchResult,
+  type TrajectorySearchScore,
+  type TrajectorySearchScoreContext,
+  type TrajectorySearchStrategy,
   type Usage
 } from "@agentrewind/core";
 
 const program = new Command();
+const originalArgv = process.argv.slice();
+type MaybePromise<T> = T | Promise<T>;
+type CliSearchScorer = (ctx: TrajectorySearchScoreContext) => MaybePromise<number | TrajectorySearchScore>;
 
 program.name("agentrewind").alias("arw").description("Inspect and package AgentRewind sessions").version("0.1.4");
 
@@ -184,6 +197,86 @@ program
     await runForkCommand(session, opts);
   });
 
+const searchCommand = program.command("search").description("Fork multiple candidate tails and rank them against a goal");
+
+searchCommand
+  .command("report")
+  .argument("<search>", "search id or path to a persisted search manifest")
+  .option("--store <dir>", "store used when <search> is an id", ".rewind")
+  .option("--json", "print machine-readable JSON")
+  .description("Print a persisted trajectory-search report")
+  .action(async (search: string, rawOpts: unknown, rawCommand: unknown) => {
+    const opts = { ...commandOptions<SearchReportCliOptions>(rawOpts), ...commandOptions<SearchReportCliOptions>(rawCommand) };
+    await runSearchReportCommand(search, {
+      ...opts,
+      store: cliOptionValue("--store") ?? opts.store ?? ".rewind",
+      json: cliHasFlag("--json") || Boolean(opts.json)
+    });
+  });
+
+searchCommand
+  .command("promote")
+  .argument("<child>", "winning child session path, session id, or latest")
+  .option("--store <dir>", "store used when <child> is an id or latest", ".rewind")
+  .option("--out <file>", "write fixture to this path")
+  .option("--force", "overwrite --out when it already exists")
+  .option("--json", "print machine-readable JSON")
+  .description("Generate a regression fixture from a winning search child")
+  .action(async (child: string, rawOpts: unknown, rawCommand: unknown) => {
+    const opts = { ...commandOptions<SearchPromoteCliOptions>(rawOpts), ...commandOptions<SearchPromoteCliOptions>(rawCommand) };
+    await runSearchPromoteCommand(child, {
+      ...opts,
+      store: cliOptionValue("--store") ?? opts.store ?? ".rewind",
+      out: cliOptionValue("--out") ?? opts.out,
+      force: cliHasFlag("--force") || Boolean(opts.force),
+      json: cliHasFlag("--json") || Boolean(opts.json)
+    });
+  });
+
+searchCommand
+  .argument("<session>", "session path, session id, store with one session, or latest")
+  .option("--store <dir>", "store used when <session> is an id or latest", ".rewind")
+  .option("--step <n>", "model-call step where every rollout begins", parseInteger)
+  .option("--at <n>", "alias for --step", parseInteger)
+  .option("--from-step <n>", "alias for --step", parseInteger)
+  .option("--site <name>", "model-call site to search from")
+  .option("--provider <name>", "auto, openai, openai-compatible, openrouter, or anthropic", "auto")
+  .option("--model <id>", "override the model id for live tail model calls")
+  .option("--candidate <label::system>", "candidate system prompt override; repeat for prompt sweeps", collectOption, [])
+  .option("--actions <file>", "JSON candidates: [{ id, label, system, model, prior }]")
+  .option("--goal-contains <text>", "score a rollout as 1 when live model output contains this text")
+  .option("--goal-regex <pattern>", "score a rollout as 1 when live model output matches this regex")
+  .option("--goal-regex-flags <flags>", "regex flags for --goal-regex, for example i")
+  .option("--goal-json <path=value>", "score JSON model output by dot path equality; repeat for multiple checks", collectOption, [])
+  .option("--goal-tool <name>", "score a rollout as 1 when the child trace includes this tool call; repeat for multiple tools", collectOption, [])
+  .option("--scorer <file>", "ESM scorer module exporting default or score(ctx); enables custom/LLM-as-judge scoring")
+  .option("--strategy <name>", "search strategy: beam, monte-carlo, ucb, mcts, or alpha-zero", parseSearchStrategy, "beam")
+  .option("--max-rollouts <n>", "maximum live fork rollouts", parseInteger)
+  .option("--max-depth <n>", "maximum action-sequence depth", parseInteger)
+  .option("--beam-width <n>", "beam width for --strategy beam", parseInteger)
+  .option("--exploration-weight <n>", "UCB/UCT exploration weight for --strategy ucb or mcts", parseFiniteNumber)
+  .option("--puct-exploration <n>", "PUCT exploration weight for --strategy alpha-zero", parseFiniteNumber)
+  .option("--stop-score <n>", "stop once a rollout reaches this score", parseFiniteNumber)
+  .option("--concurrency <n>", "parallel rollout starts for independent beam expansions", parseInteger)
+  .option("--retry-attempts <n>", "retry attempts per rollout", parseInteger)
+  .option("--retry-base-delay-ms <n>", "initial retry backoff in milliseconds", parseInteger)
+  .option("--rate-limit <n>", "maximum rollout starts per second", parseInteger)
+  .option("--best-branch-by <metric>", "aggregate branch winner: mean, lower-confidence-bound, or pass-rate", parseBestBranchMetric)
+  .option("--branch-pass-score <n>", "score threshold counted as a branch pass", parseFiniteNumber)
+  .option("--api-key-env <name>", "environment variable containing the provider API key")
+  .option("--base-url <url>", "OpenAI-compatible base URL")
+  .option("--base-url-env <name>", "environment variable containing the OpenAI-compatible base URL")
+  .option("--app-url <url>", "OpenRouter attribution URL")
+  .option("--app-title <title>", "OpenRouter attribution title")
+  .option("--app-categories <list>", "comma-separated OpenRouter attribution categories")
+  .option("--tool-miss <policy>", "tail tool miss policy: error or stub", "error")
+  .option("--dry-run", "print the resolved search plan without calling the provider")
+  .option("--check-provider", "with --dry-run, validate provider credentials and client shape without creating child sessions")
+  .option("--json", "print machine-readable JSON")
+  .action(async (session: string, opts: SearchCliOptions) => {
+    await runSearchCommand(session, opts);
+  });
+
 program
   .command("tool")
   .argument("<session>")
@@ -299,6 +392,41 @@ interface ForkCliOptions extends SessionSelectorOptions {
   json?: boolean;
 }
 
+interface SearchCliOptions extends ForkCliOptions {
+  candidate?: string[];
+  actions?: string;
+  goalContains?: string;
+  goalRegex?: string;
+  goalRegexFlags?: string;
+  goalJson?: string[];
+  goalTool?: string[];
+  scorer?: string;
+  strategy?: TrajectorySearchStrategy;
+  maxRollouts?: number;
+  maxDepth?: number;
+  beamWidth?: number;
+  explorationWeight?: number;
+  puctExploration?: number;
+  stopScore?: number;
+  concurrency?: number;
+  retryAttempts?: number;
+  retryBaseDelayMs?: number;
+  rateLimit?: number;
+  bestBranchBy?: TrajectoryBestBranchMetric;
+  branchPassScore?: number;
+}
+
+interface SearchReportCliOptions {
+  store?: string;
+  json?: boolean;
+}
+
+interface SearchPromoteCliOptions extends SessionSelectorOptions {
+  out?: string;
+  force?: boolean;
+  json?: boolean;
+}
+
 interface ForkClientConfig {
   kind: ForkProviderKind;
   codec: ProviderCodec;
@@ -321,6 +449,46 @@ interface ForkTraceSummary {
   recordedToolCalls: number;
   entropyDraws: number;
   liveEntropyDraws: number;
+}
+
+interface SearchActionFileEntry {
+  id?: string;
+  label?: string;
+  system?: string;
+  model?: string;
+  prior?: number;
+  metadata?: unknown;
+}
+
+interface SearchPlan {
+  parent: string;
+  provider: string;
+  client: ForkProviderKind;
+  atStep: number;
+  site?: string;
+  stepModel?: string;
+  strategy: TrajectorySearchStrategy;
+  scoring: string;
+  goalContains?: string;
+  candidates: ReturnType<typeof summarizeSearchAction>[];
+  budget: {
+    maxRollouts?: number;
+    maxDepth?: number;
+    beamWidth?: number;
+    explorationWeight?: number;
+    puctExploration?: number;
+    stopScore?: number;
+    concurrency?: number;
+    retryAttempts?: number;
+    retryBaseDelayMs?: number;
+    rateLimit?: number;
+    bestBranchBy?: TrajectoryBestBranchMetric;
+    branchPassScore?: number;
+  };
+  toolMiss: ForkToolMissPolicy;
+  providerChecked: boolean;
+  apiKeyEnv?: string;
+  baseURL?: string;
 }
 
 async function resolveSessionSelector(selector: string, opts: SessionSelectorOptions = {}): Promise<string> {
@@ -394,6 +562,336 @@ async function runForkCommand(session: string, opts: ForkCliOptions): Promise<vo
     return;
   }
   console.log(formatForkResult(payload));
+}
+
+async function runSearchCommand(session: string, opts: SearchCliOptions): Promise<void> {
+  const sessionPath = await resolveSessionSelector(session, opts);
+  const stored = await readSession(sessionPath);
+  const selection = selectForkStep(stored.events, opts);
+  const providerKind = resolveForkProvider(stored.meta.provider, opts.provider);
+  const actions = await readSearchActions(opts);
+  const scoring = await createSearchScorer(opts);
+  const toolMiss = parseForkToolMissPolicy(opts.toolMiss ?? "error");
+  const providerChecked = !opts.dryRun || Boolean(opts.checkProvider);
+  const client = createForkClient(providerKind, opts, providerChecked);
+
+  assertForkProviderMatches(stored.meta.provider, client);
+  if (client.model) {
+    assertProviderClient(client.model, client.codec);
+  }
+
+  const plan: SearchPlan = {
+    parent: sessionPath,
+    provider: client.codec.name,
+    client: client.kind,
+    atStep: selection.step,
+    site: selection.site,
+    stepModel: selection.model,
+    strategy: opts.strategy ?? "beam",
+    scoring: scoring.description,
+    ...(opts.goalContains === undefined ? {} : { goalContains: opts.goalContains }),
+    candidates: actions.map(summarizeSearchAction),
+    budget: {
+      ...(opts.maxRollouts === undefined ? {} : { maxRollouts: opts.maxRollouts }),
+      ...(opts.maxDepth === undefined ? {} : { maxDepth: opts.maxDepth }),
+      ...(opts.beamWidth === undefined ? {} : { beamWidth: opts.beamWidth }),
+      ...(opts.explorationWeight === undefined ? {} : { explorationWeight: opts.explorationWeight }),
+      ...(opts.puctExploration === undefined ? {} : { puctExploration: opts.puctExploration }),
+      ...(opts.stopScore === undefined ? {} : { stopScore: opts.stopScore }),
+      ...(opts.concurrency === undefined ? {} : { concurrency: opts.concurrency }),
+      ...(opts.retryAttempts === undefined ? {} : { retryAttempts: opts.retryAttempts }),
+      ...(opts.retryBaseDelayMs === undefined ? {} : { retryBaseDelayMs: opts.retryBaseDelayMs }),
+      ...(opts.rateLimit === undefined ? {} : { rateLimit: opts.rateLimit }),
+      ...(opts.bestBranchBy === undefined ? {} : { bestBranchBy: opts.bestBranchBy }),
+      ...(opts.branchPassScore === undefined ? {} : { branchPassScore: opts.branchPassScore })
+    },
+    toolMiss,
+    providerChecked,
+    ...(client.apiKeyEnv ? { apiKeyEnv: client.apiKeyEnv } : {}),
+    ...(client.baseURL ? { baseURL: client.baseURL } : {})
+  };
+
+  if (opts.dryRun) {
+    if (opts.json) {
+      console.log(JSON.stringify({ ok: true, dryRun: true, ...plan }, null, 2));
+      return;
+    }
+    console.log(formatSearchPlan(plan));
+    return;
+  }
+
+  const replay = await AgentRewind.replay(sessionPath, {
+    codec: client.codec,
+    model: client.model
+  });
+  const result = await replay.search({
+    atStep: selection.step,
+    model: client.model,
+    actions,
+    strategy: opts.strategy ?? "beam",
+    budget: {
+      ...(opts.maxRollouts === undefined ? {} : { maxRollouts: opts.maxRollouts }),
+      ...(opts.maxDepth === undefined ? {} : { maxDepth: opts.maxDepth }),
+      ...(opts.beamWidth === undefined ? {} : { beamWidth: opts.beamWidth }),
+      ...(opts.explorationWeight === undefined ? {} : { explorationWeight: opts.explorationWeight }),
+      ...(opts.puctExploration === undefined ? {} : { puctExploration: opts.puctExploration }),
+      ...(opts.stopScore === undefined ? {} : { stopScore: opts.stopScore })
+    },
+    ...(opts.concurrency === undefined ? {} : { concurrency: opts.concurrency }),
+    ...(opts.retryAttempts === undefined && opts.retryBaseDelayMs === undefined
+      ? {}
+      : {
+          retry: {
+            ...(opts.retryAttempts === undefined ? {} : { attempts: opts.retryAttempts }),
+            ...(opts.retryBaseDelayMs === undefined ? {} : { baseDelayMs: opts.retryBaseDelayMs })
+          }
+        }),
+    ...(opts.rateLimit === undefined ? {} : { rateLimit: { maxStarts: opts.rateLimit } }),
+    ...(opts.bestBranchBy === undefined ? {} : { bestBranchBy: opts.bestBranchBy }),
+    ...(opts.branchPassScore === undefined ? {} : { branchPassScore: opts.branchPassScore }),
+    tools: { onMiss: toolMiss },
+    score: scoring.score
+  });
+  const payload = {
+    ok: true,
+    ...plan,
+    rollouts: result.rollouts,
+    tokensSpent: result.tokensSpent,
+    judgeUsage: result.judgeUsage,
+    stoppedReason: result.stoppedReason,
+    searchId: result.searchId,
+    searchPath: result.searchPath,
+    best: result.best ? summarizeSearchNode(result.best) : undefined,
+    bestBranch: result.bestBranch,
+    bestBranchBy: result.bestBranchBy,
+    nodes: result.nodes.filter((node) => node.id !== "root").map(summarizeSearchNode),
+    diagnostics: result.diagnostics,
+    nextCommands: result.best?.sessionPath
+      ? [`agentrewind inspect ${shellArg(result.best.sessionPath)}`, `agentrewind context ${shellArg(result.best.sessionPath)}`]
+      : []
+  };
+
+  if (opts.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log(formatSearchResult(payload));
+}
+
+async function runSearchReportCommand(searchSelector: string, opts: SearchReportCliOptions): Promise<void> {
+  const searchPath = await resolveSearchManifestPath(searchSelector, opts.store ?? ".rewind");
+  const report = JSON.parse(await readFile(searchPath, "utf8")) as Record<string, unknown>;
+  const payload = {
+    ok: true,
+    path: searchPath,
+    ...report
+  };
+  if (opts.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log(formatSearchReport(payload));
+}
+
+async function runSearchPromoteCommand(childSelector: string, opts: SearchPromoteCliOptions): Promise<void> {
+  const childPath = await resolveSessionSelector(childSelector, opts);
+  const child = await readSession(childPath);
+  const searchMeta = child.meta.search;
+  if (!searchMeta) {
+    throw new TypeError(`Session ${childPath} is not annotated as a trajectory-search child.`);
+  }
+  const out = opts.out ?? join(dirname(childPath), "regressions", `${child.meta.id}.regression.json`);
+  const fixture = {
+    schema: "agentrewind.search-regression-fixture",
+    version: 1,
+    createdAt: new Date().toISOString(),
+    childSessionId: child.meta.id,
+    childSessionPath: childPath,
+    parentSessionId: searchMeta.parentSessionId,
+    searchId: searchMeta.searchId,
+    searchPath: searchMeta.searchPath,
+    atStep: searchMeta.atStep,
+    nodeId: searchMeta.nodeId,
+    rollout: searchMeta.rollout,
+    actionSequence: searchMeta.actionSequence,
+    actionSequenceKeys: searchMeta.actionSequenceKeys ?? [],
+    expected: {
+      ...(searchMeta.score === undefined ? {} : { score: searchMeta.score }),
+      ...(searchMeta.reason === undefined ? {} : { reason: searchMeta.reason })
+    },
+    replay: {
+      session: childPath,
+      inspectCommand: `agentrewind inspect ${shellArg(childPath)}`,
+      contextCommand: `agentrewind context ${shellArg(childPath)}`
+    }
+  };
+  await writeStarterFile(out, `${JSON.stringify(fixture, null, 2)}\n`, Boolean(opts.force));
+  const payload = {
+    ok: true,
+    fixturePath: out,
+    ...fixture
+  };
+  if (opts.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log(formatSearchPromoteResult(payload));
+}
+
+async function createSearchScorer(opts: SearchCliOptions): Promise<{ description: string; score: CliSearchScorer }> {
+  if (opts.scorer) {
+    return {
+      description: `custom scorer ${opts.scorer}`,
+      score: await loadSearchScorer(opts.scorer)
+    };
+  }
+
+  const checks: Array<{ description: string; evaluate(ctx: TrajectorySearchScoreContext): { ok: boolean; reason: string; metadata?: JsonValue } }> = [];
+  if (opts.goalContains !== undefined) {
+    const goal = opts.goalContains.toLowerCase();
+    checks.push({
+      description: `live output contains ${JSON.stringify(opts.goalContains)}`,
+      evaluate: ({ trace }) => {
+        const text = modelOutputText(trace.events());
+        return {
+          ok: text.toLowerCase().includes(goal),
+          reason: truncateForCli(text || "No live model text output was found.", 240)
+        };
+      }
+    });
+  }
+  if (opts.goalRegex !== undefined) {
+    const regex = new RegExp(opts.goalRegex, opts.goalRegexFlags ?? "");
+    checks.push({
+      description: `live output matches /${opts.goalRegex}/${opts.goalRegexFlags ?? ""}`,
+      evaluate: ({ trace }) => {
+        const text = modelOutputText(trace.events());
+        return {
+          ok: regex.test(text),
+          reason: truncateForCli(text || "No live model text output was found.", 240)
+        };
+      }
+    });
+  }
+  for (const spec of opts.goalJson ?? []) {
+    const parsed = parseJsonGoal(spec);
+    checks.push({
+      description: `JSON output ${parsed.path.join(".")} equals ${JSON.stringify(parsed.expected)}`,
+      evaluate: ({ trace }) => {
+        const text = modelOutputText(trace.events());
+        const parsedJson = parseFirstJsonObject(text);
+        if (!parsedJson.ok) {
+          return { ok: false, reason: parsedJson.reason };
+        }
+        const actual = getPath(parsedJson.value, parsed.path);
+        const ok = jsonEqual(actual, parsed.expected);
+        return {
+          ok,
+          reason: ok
+            ? `${parsed.path.join(".")} matched`
+            : `${parsed.path.join(".")}=${JSON.stringify(actual)} did not equal ${JSON.stringify(parsed.expected)}`,
+          metadata: { actual: toJsonValue(actual) ?? null, expected: toJsonValue(parsed.expected) ?? null, path: parsed.path }
+        };
+      }
+    });
+  }
+  for (const toolName of opts.goalTool ?? []) {
+    checks.push({
+      description: `trace includes tool call ${JSON.stringify(toolName)}`,
+      evaluate: ({ trace }) => {
+        const found = trace.events().some((event) => event.kind === "tool_call" && event.name === toolName);
+        return {
+          ok: found,
+          reason: found ? `tool ${toolName} was called` : `tool ${toolName} was not called`
+        };
+      }
+    });
+  }
+
+  if (checks.length === 0) {
+    throw new TypeError(
+      "Search needs a scoring metric. Pass --goal-contains, --goal-regex, --goal-json, --goal-tool, or --scorer."
+    );
+  }
+
+  return {
+    description: checks.map((check) => check.description).join("; "),
+    score: (ctx) => {
+      const results = checks.map((check) => check.evaluate(ctx));
+      const failed = results.filter((result) => !result.ok);
+      return {
+        score: failed.length === 0 ? 1 : 0,
+        reason: results.map((result) => result.reason).join(" | "),
+        metadata: {
+          checks: results.map((result) => ({
+            ok: result.ok,
+            reason: result.reason,
+            ...(result.metadata === undefined ? {} : { metadata: result.metadata })
+          }))
+        }
+      };
+    }
+  };
+}
+
+async function loadSearchScorer(path: string): Promise<CliSearchScorer> {
+  const module = (await import(pathToFileURL(resolve(path)).href)) as { default?: unknown; score?: unknown };
+  const scorer = module.default ?? module.score;
+  if (typeof scorer !== "function") {
+    throw new TypeError(`Search scorer ${path} must export a default function or named score(ctx) function.`);
+  }
+  return scorer as CliSearchScorer;
+}
+
+function parseJsonGoal(spec: string): { path: string[]; expected: unknown } {
+  const separator = spec.indexOf("=");
+  if (separator <= 0) {
+    throw new TypeError('JSON goals use "path=value", for example --goal-json "route=escalate-to-csm".');
+  }
+  const rawPath = spec.slice(0, separator).trim();
+  const normalizedPath = rawPath === "$" ? "" : rawPath.startsWith("$.") ? rawPath.slice(2) : rawPath;
+  const path = normalizedPath
+    .split(".")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (path.length === 0) {
+    throw new TypeError(`JSON goal ${JSON.stringify(spec)} has an empty path.`);
+  }
+  const rawExpected = spec.slice(separator + 1);
+  let expected: unknown = rawExpected;
+  try {
+    expected = JSON.parse(rawExpected);
+  } catch {
+    expected = rawExpected;
+  }
+  return { path, expected };
+}
+
+function parseFirstJsonObject(text: string): { ok: true; value: unknown } | { ok: false; reason: string } {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { ok: false, reason: "No live model text output was found." };
+  }
+  try {
+    return { ok: true, value: JSON.parse(trimmed) };
+  } catch (error) {
+    return { ok: false, reason: `Live model output was not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+function getPath(value: unknown, path: string[]): unknown {
+  let current = value;
+  for (const part of path) {
+    if (current === null || typeof current !== "object") {
+      return undefined;
+    }
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function jsonEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function selectForkStep(events: RewindEvent[], opts: ForkCliOptions): ForkStepSelection {
@@ -697,6 +1195,360 @@ function formatForkResult(result: {
     "Next commands:",
     ...result.nextCommands.map((command) => `- ${command}`)
   ].join("\n");
+}
+
+async function readSearchActions(opts: SearchCliOptions): Promise<TrajectorySearchAction[]> {
+  const fromFile = opts.actions ? await readSearchActionsFile(opts.actions, opts.model) : [];
+  const fromCli = (opts.candidate ?? []).map((candidate, index) => parseCandidateAction(candidate, index, opts.model));
+  const actions = [...fromFile, ...fromCli];
+  if (actions.length === 0) {
+    throw new TypeError('Search needs at least one candidate. Pass --candidate "label::system prompt" or --actions candidates.json.');
+  }
+  return actions;
+}
+
+async function readSearchActionsFile(path: string, defaultModel: string | undefined): Promise<TrajectorySearchAction[]> {
+  const parsed = JSON.parse(await readFile(path, "utf8")) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new TypeError("--actions must point to a JSON array of candidates.");
+  }
+  return parsed.map((entry, index) => actionFromFileEntry(entry, index, defaultModel));
+}
+
+function actionFromFileEntry(entry: unknown, index: number, defaultModel: string | undefined): TrajectorySearchAction {
+  if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+    throw new TypeError(`Search candidate ${index + 1} must be an object.`);
+  }
+  const candidate = entry as SearchActionFileEntry;
+  const id = candidate.id ?? slugActionId(candidate.label ?? `candidate-${index + 1}`);
+  if (candidate.system !== undefined && typeof candidate.system !== "string") {
+    throw new TypeError(`Search candidate ${id} has a non-string system field.`);
+  }
+  if (candidate.model !== undefined && typeof candidate.model !== "string") {
+    throw new TypeError(`Search candidate ${id} has a non-string model field.`);
+  }
+  if (candidate.prior !== undefined && (typeof candidate.prior !== "number" || !Number.isFinite(candidate.prior) || candidate.prior < 0)) {
+    throw new TypeError(`Search candidate ${id} has a non-negative finite number prior.`);
+  }
+  const model = candidate.model ?? defaultModel;
+  if (candidate.system === undefined && model === undefined) {
+    throw new TypeError(`Search candidate ${id} needs a system prompt or model override.`);
+  }
+  return {
+    id,
+    ...(candidate.label === undefined ? {} : { label: String(candidate.label) }),
+    overrides: {
+      ...(candidate.system === undefined ? {} : { system: candidate.system }),
+      ...(model === undefined ? {} : { model })
+    },
+    ...(candidate.prior === undefined ? {} : { prior: candidate.prior }),
+    ...(candidate.metadata === undefined ? {} : { metadata: toJsonValue(candidate.metadata) ?? null })
+  };
+}
+
+function parseCandidateAction(value: string, index: number, defaultModel: string | undefined): TrajectorySearchAction {
+  const separator = value.indexOf("::");
+  if (separator < 0) {
+    throw new TypeError('Search candidates use "label::system prompt", for example --candidate "Escalate::Always escalate enterprise refunds".');
+  }
+  const label = value.slice(0, separator).trim();
+  const system = value.slice(separator + 2).trim();
+  if (!label || !system) {
+    throw new TypeError('Search candidates need both sides of "label::system prompt".');
+  }
+  return {
+    id: slugActionId(label) || `candidate-${index + 1}`,
+    label,
+    overrides: {
+      system,
+      ...(defaultModel === undefined ? {} : { model: defaultModel })
+    }
+  };
+}
+
+function summarizeSearchAction(action: TrajectorySearchAction | undefined): {
+  id?: string;
+  actionKey?: string;
+  label?: string;
+  overrides: { system: boolean; model?: string };
+  prior?: number;
+  metadata?: unknown;
+} {
+  return {
+    ...(action?.id === undefined ? {} : { id: action.id }),
+    ...(action?.actionKey === undefined ? {} : { actionKey: action.actionKey }),
+    ...(action?.label === undefined ? {} : { label: action.label }),
+    overrides: summarizeOverrides(action?.overrides ?? {}),
+    ...(action?.prior === undefined ? {} : { prior: action.prior }),
+    ...(action?.metadata === undefined ? {} : { metadata: action.metadata })
+  };
+}
+
+function summarizeSearchNode(node: TrajectorySearchNode): {
+  id: string;
+  parentId?: string;
+  depth: number;
+  rollout: number;
+  action: ReturnType<typeof summarizeSearchAction>;
+  actionKey?: string;
+  actionSequence: ReturnType<typeof summarizeSearchAction>[];
+  actionSequenceKeys: string[];
+  sessionId?: string;
+  sessionPath?: string;
+  score?: number;
+  reason?: string;
+  scoreMetadata?: unknown;
+  judgeUsage?: Usage;
+  tokensSpent: Usage;
+  reachedGoal?: boolean;
+  divergedAtStep?: number;
+  error?: unknown;
+  visits?: number;
+  valueSum?: number;
+  meanScore?: number;
+  prior?: number;
+  selectionScore?: number;
+  selectionReason?: TrajectorySearchNode["selectionReason"];
+} {
+  return {
+    id: node.id,
+    ...(node.parentId === undefined ? {} : { parentId: node.parentId }),
+    depth: node.depth,
+    rollout: node.rollout,
+    action: summarizeSearchAction(node.action),
+    ...(node.actionKey === undefined ? {} : { actionKey: node.actionKey }),
+    actionSequence: node.actionSequence.map(summarizeSearchAction),
+    actionSequenceKeys: node.actionSequenceKeys,
+    ...(node.sessionId === undefined ? {} : { sessionId: node.sessionId }),
+    ...(node.sessionPath === undefined ? {} : { sessionPath: node.sessionPath }),
+    ...(node.score === undefined ? {} : { score: node.score }),
+    ...(node.reason === undefined ? {} : { reason: node.reason }),
+    ...(node.scoreMetadata === undefined ? {} : { scoreMetadata: node.scoreMetadata }),
+    ...(node.judgeUsage === undefined ? {} : { judgeUsage: node.judgeUsage }),
+    tokensSpent: node.tokensSpent,
+    ...(node.reachedGoal === undefined ? {} : { reachedGoal: node.reachedGoal }),
+    ...(node.divergedAtStep === undefined ? {} : { divergedAtStep: node.divergedAtStep }),
+    ...(node.error === undefined ? {} : { error: node.error }),
+    ...(node.visits === undefined ? {} : { visits: node.visits }),
+    ...(node.valueSum === undefined ? {} : { valueSum: node.valueSum }),
+    ...(node.meanScore === undefined ? {} : { meanScore: node.meanScore }),
+    ...(node.prior === undefined ? {} : { prior: node.prior }),
+    ...(node.selectionScore === undefined ? {} : { selectionScore: node.selectionScore }),
+    ...(node.selectionReason === undefined ? {} : { selectionReason: node.selectionReason })
+  };
+}
+
+function formatSearchPlan(plan: SearchPlan): string {
+  return [
+    "AgentRewind search plan.",
+    "",
+    `Parent: ${plan.parent}`,
+    `Fork point: step ${plan.atStep}${plan.site ? ` (${plan.site})` : ""}`,
+    `Provider: ${plan.provider} via ${plan.client}`,
+    ...(plan.stepModel ? [`Recorded model: ${plan.stepModel}`] : []),
+    `Strategy: ${plan.strategy}`,
+    plan.goalContains !== undefined ? `Goal: live output contains ${JSON.stringify(plan.goalContains)}` : `Scoring: ${plan.scoring}`,
+    `Candidates: ${plan.candidates.length}`,
+    ...plan.candidates.map((candidate, index) => `- ${index + 1}. ${formatSearchActionSummary(candidate)}`),
+    `Budget: ${formatSearchBudget(plan.budget)}`,
+    `Tool miss policy: ${plan.toolMiss}`,
+    ...(plan.apiKeyEnv ? [`API key env: ${plan.apiKeyEnv}`] : []),
+    ...(plan.baseURL ? [`Base URL: ${plan.baseURL}`] : []),
+    "",
+    plan.providerChecked
+      ? "Dry run checked provider credentials/client shape, but made no provider call and wrote no child sessions."
+      : "Dry run made no provider call, wrote no child sessions, and did not check provider credentials. Add --check-provider to validate setup."
+  ].join("\n");
+}
+
+function formatSearchResult(result: SearchPlan & {
+  rollouts: number;
+  tokensSpent: Usage;
+  judgeUsage?: Usage;
+  stoppedReason: string;
+  searchId?: string;
+  searchPath?: string;
+  best?: ReturnType<typeof summarizeSearchNode>;
+  bestBranch?: TrajectorySearchResult["bestBranch"];
+  bestBranchBy?: TrajectoryBestBranchMetric;
+  nextCommands: string[];
+}): string {
+  return [
+    "AgentRewind search complete.",
+    "",
+    `Parent: ${result.parent}`,
+    `Fork point: step ${result.atStep}${result.site ? ` (${result.site})` : ""}`,
+    `Strategy: ${result.strategy}`,
+    result.goalContains !== undefined ? `Goal: live output contains ${JSON.stringify(result.goalContains)}` : `Scoring: ${result.scoring}`,
+    `Rollouts: ${result.rollouts}`,
+    `Stopped: ${result.stoppedReason}`,
+    `Live tail tokens: in=${result.tokensSpent.inputTokens} out=${result.tokensSpent.outputTokens}`,
+    ...(result.judgeUsage && (result.judgeUsage.inputTokens > 0 || result.judgeUsage.outputTokens > 0 || result.judgeUsage.costUsd !== undefined)
+      ? [`Judge tokens: in=${result.judgeUsage.inputTokens} out=${result.judgeUsage.outputTokens}${result.judgeUsage.costUsd === undefined ? "" : ` cost=$${result.judgeUsage.costUsd}`}`]
+      : []),
+    ...(result.searchId ? [`Search id: ${result.searchId}`] : []),
+    ...(result.searchPath ? [`Report: ${result.searchPath}`] : []),
+    "",
+    result.best ? `Best: score=${result.best.score ?? "n/a"} ${formatSearchActionSummary(result.best.action)}` : "Best: none",
+    ...(result.bestBranch
+      ? [`Best branch (${result.bestBranchBy ?? "mean"}): score=${formatBranchMetric(result.bestBranch, result.bestBranchBy ?? "mean")} ${result.bestBranch.actionSequence.join(" > ")}`]
+      : []),
+    ...(result.best?.reason ? [`Reason: ${result.best.reason}`] : []),
+    ...(result.best?.sessionPath ? [`Child: ${result.best.sessionPath}`] : []),
+    ...(result.nextCommands.length === 0 ? [] : ["", "Next commands:", ...result.nextCommands.map((command) => `- ${command}`)])
+  ].join("\n");
+}
+
+async function resolveSearchManifestPath(selector: string, store: string): Promise<string> {
+  const direct = resolve(selector);
+  try {
+    await access(direct);
+    return direct;
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  const byId = join(store, "searches", selector.endsWith(".json") ? selector : `${selector}.json`);
+  try {
+    await access(byId);
+    return byId;
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+  throw new TypeError(`No trajectory-search report found for ${selector}. Expected ${direct} or ${byId}.`);
+}
+
+function formatSearchReport(report: Record<string, unknown>): string {
+  const bestBranch = report.bestBranch as { actionSequence?: string[]; meanScore?: number; passRate?: number; lowerConfidenceBound?: number } | undefined;
+  const diagnostics = report.diagnostics as { branches?: Array<{ actionSequence?: string[]; visits?: number; meanScore?: number; passRate?: number }> } | undefined;
+  const lines = [
+    "AgentRewind search report.",
+    "",
+    `Search id: ${String(report.searchId ?? "unknown")}`,
+    `Path: ${String(report.path ?? "unknown")}`,
+    `Parent: ${String(report.parentSessionPath ?? report.parentSessionId ?? "unknown")}`,
+    `Fork point: step ${String(report.atStep ?? "?")}`,
+    `Strategy: ${String(report.strategy ?? "unknown")}`,
+    `Rollouts: ${String(report.rollouts ?? 0)}`,
+    `Stopped: ${String(report.stoppedReason ?? "unknown")}`,
+    `Best child: ${String(report.bestSessionPath ?? report.bestSessionId ?? "none")}`,
+    ...(bestBranch
+      ? [
+          `Best branch: ${(bestBranch.actionSequence ?? []).join(" > ") || "unknown"} mean=${formatNumber(bestBranch.meanScore)} passRate=${formatNumber(bestBranch.passRate)} lcb=${formatNumber(bestBranch.lowerConfidenceBound)}`
+        ]
+      : [])
+  ];
+  const branches = diagnostics?.branches ?? [];
+  if (branches.length > 0) {
+    lines.push("", "Branches:");
+    for (const branch of branches.slice(0, 8)) {
+      lines.push(
+        `- ${(branch.actionSequence ?? []).join(" > ") || "unknown"} visits=${branch.visits ?? 0} mean=${formatNumber(branch.meanScore)} passRate=${formatNumber(branch.passRate)}`
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
+function formatSearchPromoteResult(result: {
+  fixturePath: string;
+  childSessionPath: string;
+  searchId: string;
+  actionSequence: string[];
+  expected: { score?: number; reason?: string };
+}): string {
+  return [
+    "AgentRewind regression fixture written.",
+    "",
+    `Fixture: ${result.fixturePath}`,
+    `Child: ${result.childSessionPath}`,
+    `Search id: ${result.searchId}`,
+    `Action sequence: ${result.actionSequence.join(" > ") || "unknown"}`,
+    ...(result.expected.score === undefined ? [] : [`Expected score: ${result.expected.score}`]),
+    ...(result.expected.reason === undefined ? [] : [`Expected reason: ${result.expected.reason}`])
+  ].join("\n");
+}
+
+function formatNumber(value: unknown): string {
+  return typeof value === "number" && Number.isFinite(value) ? (Number.isInteger(value) ? String(value) : value.toFixed(3)) : "n/a";
+}
+
+function formatSearchActionSummary(action: ReturnType<typeof summarizeSearchAction>): string {
+  const name = action.label ?? action.id ?? "unnamed";
+  const prior = action.prior === undefined ? "" : ` prior=${action.prior}`;
+  return `${name} (${formatOverrides(action.overrides)}${prior})`;
+}
+
+function formatSearchBudget(budget: SearchPlan["budget"]): string {
+  const parts = [
+    budget.maxRollouts === undefined ? undefined : `maxRollouts=${budget.maxRollouts}`,
+    budget.maxDepth === undefined ? undefined : `maxDepth=${budget.maxDepth}`,
+    budget.beamWidth === undefined ? undefined : `beamWidth=${budget.beamWidth}`,
+    budget.explorationWeight === undefined ? undefined : `explorationWeight=${budget.explorationWeight}`,
+    budget.puctExploration === undefined ? undefined : `puctExploration=${budget.puctExploration}`,
+    budget.stopScore === undefined ? undefined : `stopScore=${budget.stopScore}`,
+    budget.concurrency === undefined ? undefined : `concurrency=${budget.concurrency}`,
+    budget.retryAttempts === undefined ? undefined : `retryAttempts=${budget.retryAttempts}`,
+    budget.retryBaseDelayMs === undefined ? undefined : `retryBaseDelayMs=${budget.retryBaseDelayMs}`,
+    budget.rateLimit === undefined ? undefined : `rateLimit=${budget.rateLimit}/s`,
+    budget.bestBranchBy === undefined ? undefined : `bestBranchBy=${budget.bestBranchBy}`,
+    budget.branchPassScore === undefined ? undefined : `branchPassScore=${budget.branchPassScore}`
+  ].filter((part): part is string => Boolean(part));
+  return parts.length === 0 ? "defaults" : parts.join(" ");
+}
+
+function formatBranchMetric(branch: NonNullable<TrajectorySearchResult["bestBranch"]>, metric: TrajectoryBestBranchMetric): string {
+  const value =
+    metric === "lower-confidence-bound" ? branch.lowerConfidenceBound : metric === "pass-rate" ? branch.passRate : branch.meanScore;
+  return Number.isInteger(value) ? String(value) : value.toFixed(3);
+}
+
+function modelOutputText(events: RewindEvent[]): string {
+  return events
+    .filter((event): event is ModelCallEvent => event.kind === "model_call" && event.provenance === "live")
+    .map((event) => contentToText(event.response?.content))
+    .filter(Boolean)
+    .join("\n");
+}
+
+function contentToText(value: unknown): string {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(contentToText).filter(Boolean).join("\n");
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === "string") {
+      return record.text;
+    }
+    if (typeof record.content === "string") {
+      return record.content;
+    }
+    return JSON.stringify(value);
+  }
+  return String(value);
+}
+
+function truncateForCli(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function slugActionId(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "");
 }
 
 function formatOverrides(overrides: { system: boolean; model?: string }): string {
@@ -1332,11 +2184,77 @@ function shellArg(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+function commandOptions<T>(raw: unknown): T {
+  if (raw && typeof raw === "object" && typeof (raw as { opts?: unknown }).opts === "function") {
+    return (raw as { opts<TOptions>(): TOptions }).opts<T>();
+  }
+  return (raw ?? {}) as T;
+}
+
+function cliOptionValue(flag: string): string | undefined {
+  const index = originalArgv.indexOf(flag);
+  if (index >= 0) {
+    return originalArgv[index + 1];
+  }
+  const prefix = `${flag}=`;
+  const withEquals = originalArgv.find((arg) => arg.startsWith(prefix));
+  return withEquals?.slice(prefix.length);
+}
+
+function cliHasFlag(flag: string): boolean {
+  return originalArgv.includes(flag);
+}
+
 function parseInteger(value: string): number {
   if (!/^(0|[1-9]\d*)$/.test(value)) {
     throw new TypeError(`Expected a non-negative integer, got "${value}"`);
   }
   return Number(value);
+}
+
+function parseFiniteNumber(value: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new TypeError(`Expected a finite number, got "${value}"`);
+  }
+  return parsed;
+}
+
+function parseSearchStrategy(value: string): TrajectorySearchStrategy {
+  switch (value) {
+    case "beam":
+    case "monte-carlo":
+    case "ucb":
+    case "mcts":
+    case "alpha-zero":
+      return value;
+    case "montecarlo":
+      return "monte-carlo";
+    case "alphazero":
+    case "puct":
+      return "alpha-zero";
+    default:
+      throw new TypeError(`Unknown search strategy "${value}". Use beam, monte-carlo, ucb, mcts, or alpha-zero.`);
+  }
+}
+
+function parseBestBranchMetric(value: string): TrajectoryBestBranchMetric {
+  switch (value) {
+    case "mean":
+    case "lower-confidence-bound":
+    case "pass-rate":
+      return value;
+    case "lcb":
+      return "lower-confidence-bound";
+    case "pass":
+      return "pass-rate";
+    default:
+      throw new TypeError(`Unknown best branch metric "${value}". Use mean, lower-confidence-bound, or pass-rate.`);
+  }
+}
+
+function collectOption(value: string, previous: string[]): string[] {
+  return [...previous, value];
 }
 
 function parseTimelineKinds(value: string): RewindEvent["kind"][] {

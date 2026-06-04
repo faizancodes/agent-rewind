@@ -47,9 +47,11 @@ export interface ForkOptions<
   runtime?: Partial<EntropyRuntime>;
 }
 
-export interface ForkResult {
+export interface ForkResult<TResult = unknown> {
   /** Child recording session id. The child contains the recorded prefix plus the forked live/stub tail. */
   sessionId: string;
+  /** Value returned by the fork harness when one was executed. */
+  result?: TResult;
   /** Result of the optional goal predicate. */
   reachedGoal?: boolean;
   /** Token usage spent by live tail model calls only. Recorded prefix events do not add token spend. */
@@ -140,6 +142,7 @@ export async function forkReplay<
   const runtime = { ...defaultEntropyRuntime, ...opts.runtime };
   let tokensSpent: Usage = { inputTokens: 0, outputTokens: 0 };
   let divergedAtStep: number | undefined;
+  let result: unknown;
 
   const state: ForkContextState<TTools> = {
     replay,
@@ -162,7 +165,7 @@ export async function forkReplay<
   const harness = opts.harness ?? replay.lastHarness;
   try {
     if (harness) {
-      await lanes.run(() => harness(context));
+      result = await lanes.run(() => harness(context));
     } else {
       await forkFromStoredEvents(state);
     }
@@ -179,6 +182,7 @@ export async function forkReplay<
   const trace = new ForkTrace(child.events());
   return {
     sessionId: child.id,
+    ...(result === undefined ? {} : { result }),
     reachedGoal: opts.goal ? opts.goal(trace) : undefined,
     tokensSpent,
     divergedAtStep,

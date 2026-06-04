@@ -17,7 +17,7 @@ export default defineConfig({
   },
   test: {
     include: ["packages/**/*.test.ts"],
-    testTimeout: 30000,
+    testTimeout: 60000,
     hookTimeout: 45000,
     teardownTimeout: 10000,
     slowTestThreshold: 1000,

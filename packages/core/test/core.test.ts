@@ -34,6 +34,7 @@ import {
   readSessionSummary,
   resolveSessionPath,
   saveVault,
+  search,
   setVaultCryptoForTests,
   unpackSession,
   usageAdd,
@@ -52,6 +53,7 @@ import {
   type Replay,
   type RewindEvent,
   type ToolValueSerializer,
+  type TrajectorySearchAction,
   type Usage
 } from "@agentrewind/core";
 import { assertReplay, fromSession } from "@agentrewind/test";
@@ -2175,6 +2177,831 @@ describe("AgentRewind core", () => {
     );
     const childReplay = await AgentRewind.replay(join(store, result.sessionId), { codec });
     await childReplay.run(async (ctx) => ctx.model.create(req("tail"), { site: "tail" }));
+  });
+
+  it("trajectory search scores forked results and leaves the selected child replayable with the full harness", async () => {
+    const store = await tempStore();
+    const tools = {
+      policy: async () => ({ tier: "enterprise", renewalAgeDays: 21 })
+    };
+    const harness = async (ctx: AgentContext) => {
+      const policy = (await ctx.tools.policy!({ customerId: "cus_123" })) as { tier: string; renewalAgeDays: number };
+      const response = await ctx.model.create<NormalizedResponse>(
+        {
+          ...req(`tier=${policy.tier}; renewal_age=${policy.renewalAgeDays}`),
+          system: "Route support refunds using the policy snapshot."
+        },
+        { site: "decision" }
+      );
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-tool-prefix",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec,
+      tools
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-tool-prefix"), { codec, tools });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const captured: NormalizedRequest[] = [];
+    const actionModel = (content: string) => ({
+      async create(raw: unknown) {
+        captured.push(raw as NormalizedRequest);
+        return { content, usage: usage(2, 3) };
+      }
+    });
+
+    const result = await replay.search<string>({
+      atStep: modelStep,
+      strategy: "beam",
+      budget: { maxRollouts: 2, stopScore: 1 },
+      actions: [
+        { id: "baseline", label: "Keep current routing", model: actionModel("hold") },
+        { id: "escalate", label: "Escalate enterprise exception", model: actionModel("escalate-to-csm") }
+      ],
+      score: ({ result: forkResult }) => ({
+        score: forkResult === "escalate-to-csm" ? 1 : 0,
+        reason: String(forkResult)
+      })
+    });
+
+    expect(result.rollouts).toBe(2);
+    expect(result.stoppedReason).toBe("stopScore");
+    expect(result.best).toMatchObject({
+      action: expect.objectContaining({ id: "escalate" }),
+      score: 1,
+      result: "escalate-to-csm"
+    });
+    expect(captured[1]).toMatchObject({ system: "Route support refunds using the policy snapshot." });
+    expect(result.tokensSpent).toEqual({ inputTokens: 4, outputTokens: 6 });
+
+    const childReplay = await AgentRewind.replay(result.best!.sessionPath!, { codec, tools });
+    await expect(childReplay.run(harness)).resolves.toBe("escalate-to-csm");
+  });
+
+  it("trajectory search can run deterministic Monte Carlo rollouts and stop on token budget", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-monte-carlo",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-monte-carlo"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const liveModel = {
+      async create(raw: unknown) {
+        const request = raw as NormalizedRequest;
+        return { content: request.system?.includes("good") ? "resolved" : "still-bad", usage: usage(5, 5) };
+      }
+    };
+    const randomValues = [0.1, 0.9];
+    const actions: TrajectorySearchAction[] = [
+      { overrides: { system: "bad candidate" } },
+      { overrides: { system: "good candidate" } }
+    ];
+
+    const result = await replay.search<string>({
+      atStep: modelStep,
+      model: liveModel,
+      strategy: "monte-carlo",
+      budget: { maxRollouts: 5, maxDepth: 1, maxTokens: 1 },
+      random: () => randomValues.shift() ?? 0,
+      actions,
+      score: ({ result: forkResult }) => (forkResult === "resolved" ? 1 : 0)
+    });
+
+    expect(result.rollouts).toBe(1);
+    expect(result.stoppedReason).toBe("maxTokens");
+    expect(result.best).toMatchObject({
+      action: expect.objectContaining({ id: "action-2" }),
+      score: 1,
+      tokensSpent: { inputTokens: 5, outputTokens: 5 }
+    });
+  });
+
+  it("trajectory search can use UCB to revisit the highest-scoring candidate", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-ucb",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-ucb"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const liveModel = {
+      async create(raw: unknown) {
+        const request = raw as NormalizedRequest;
+        return { content: request.system === "escalate" ? "resolved" : "hold", usage: usage(1, 1) };
+      }
+    };
+
+    const result = await replay.search<string>({
+      atStep: modelStep,
+      model: liveModel,
+      strategy: "ucb",
+      budget: { maxRollouts: 4, explorationWeight: 0 },
+      actions: [
+        { id: "hold", overrides: { system: "hold" } },
+        { id: "escalate", overrides: { system: "escalate" } }
+      ],
+      score: ({ result: forkResult }) => (forkResult === "resolved" ? 1 : 0)
+    });
+
+    const actionCounts = result.nodes
+      .filter((node) => node.id !== "root")
+      .reduce<Record<string, number>>((counts, node) => {
+        const id = node.action?.id ?? "unknown";
+        counts[id] = (counts[id] ?? 0) + 1;
+        return counts;
+      }, {});
+    const lastEscalate = result.nodes.filter((node) => node.action?.id === "escalate").at(-1);
+
+    expect(result.rollouts).toBe(4);
+    expect(actionCounts).toEqual({ hold: 1, escalate: 3 });
+    expect(result.best?.action?.id).toBe("escalate");
+    expect(lastEscalate).toMatchObject({ visits: 3, valueSum: 3, meanScore: 1 });
+  });
+
+  it("trajectory search can use MCTS to build and replay a multi-step fork", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-mcts",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-mcts"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const liveModel = {
+      async create(raw: unknown) {
+        const request = raw as NormalizedRequest;
+        const fixedPrompt = request.system === "escalate enterprise refund exceptions";
+        const strongModel = request.model === "strong-router";
+        return { content: fixedPrompt && strongModel ? "resolved" : fixedPrompt ? "closer" : "hold", usage: usage(1, 1) };
+      }
+    };
+
+    const result = await replay.search<string>({
+      atStep: modelStep,
+      model: liveModel,
+      strategy: "mcts",
+      budget: { maxRollouts: 4, maxDepth: 2, explorationWeight: 0 },
+      actions: ({ depth }) =>
+        depth === 1
+          ? [
+              { id: "baseline-prompt", overrides: { system: "baseline" } },
+              { id: "escalate-prompt", overrides: { system: "escalate enterprise refund exceptions" } }
+            ]
+          : [
+              { id: "same-model", overrides: { model: "m" } },
+              { id: "strong-model", overrides: { model: "strong-router" } }
+            ],
+      score: ({ result: forkResult }) => (forkResult === "resolved" ? 1 : forkResult === "closer" ? 0.25 : 0)
+    });
+
+    expect(result.rollouts).toBe(4);
+    expect(result.best).toMatchObject({
+      depth: 2,
+      score: 1,
+      result: "resolved"
+    });
+    expect(result.best?.actionSequence.map((action) => action.id)).toEqual(["escalate-prompt", "strong-model"]);
+    expect(result.best?.visits).toBe(1);
+
+    const selectedHarness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>(
+        { ...req("route this ticket"), system: "escalate enterprise refund exceptions", model: "strong-router" },
+        { site: "decision" }
+      );
+      return response.content;
+    };
+    const childReplay = await AgentRewind.replay(result.best!.sessionPath!, { codec });
+    await expect(childReplay.run(selectedHarness)).resolves.toBe("resolved");
+  });
+
+  it("trajectory search exposes public root parent ids for tree search nodes", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-public-parent",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-public-parent"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+
+    const result = await replay.search<string>({
+      atStep: modelStep,
+      model: fakeModel([
+        { content: "hold", usage: usage(1, 1) },
+        { content: "resolved", usage: usage(1, 1) }
+      ]),
+      strategy: "mcts",
+      budget: { maxRollouts: 2 },
+      actions: [
+        { id: "hold", overrides: { system: "hold" } },
+        { id: "escalate", overrides: { system: "escalate" } }
+      ],
+      score: ({ result: forkResult }) => (forkResult === "resolved" ? 1 : 0)
+    });
+
+    const publicNodes = result.nodes.filter((node) => node.id !== "root");
+    expect(publicNodes.map((node) => node.parentId)).toEqual(["root", "root"]);
+    expect(publicNodes.some((node) => node.parentId === "t0")).toBe(false);
+  });
+
+  it("trajectory search rejects SDK atStep values that are not recorded boundaries", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>(req("route this ticket"), { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-invalid-step",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-invalid-step"), { codec });
+    await replay.run(harness);
+    await expect(
+      replay.search<string>({
+        atStep: 999,
+        model: fakeModel([{ content: "resolved", usage: usage(1, 1) }]),
+        actions: [{ id: "candidate", overrides: { system: "candidate" } }],
+        score: ({ result: forkResult }) => (forkResult === "resolved" ? 1 : 0)
+      })
+    ).rejects.toThrow(/not a recorded boundary step/);
+  });
+
+  it("trajectory search passes current Monte Carlo action sequence as parent context", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-monte-carlo-parent",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-monte-carlo-parent"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const seenParents: string[][] = [];
+
+    const result = await replay.search<string>({
+      atStep: modelStep,
+      model: fakeModel([{ content: "resolved", usage: usage(1, 1) }]),
+      strategy: "monte-carlo",
+      budget: { maxRollouts: 1, maxDepth: 2 },
+      random: () => 0.75,
+      actions: ({ depth, parent }) => {
+        seenParents.push(parent?.actionSequence.map((action) => action.id ?? "") ?? []);
+        return depth === 1
+          ? [{ id: "prompt", overrides: { system: "prompt" } }]
+          : [{ id: parent?.action?.id === "prompt" ? "model-after-prompt" : "wrong", overrides: { model: "strong" } }];
+      },
+      score: ({ actionSequence }) => (actionSequence.map((action) => action.id).join(">") === "prompt>model-after-prompt" ? 1 : 0)
+    });
+
+    expect(seenParents).toEqual([[], ["prompt"]]);
+    expect(result.best?.actionSequence.map((action) => action.id)).toEqual(["prompt", "model-after-prompt"]);
+  });
+
+  it("trajectory search can use AlphaZero-style priors to pick the first expansion", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-alpha-zero",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-alpha-zero"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const captured: NormalizedRequest[] = [];
+    const liveModel = {
+      async create(raw: unknown) {
+        const request = raw as NormalizedRequest;
+        captured.push(request);
+        return { content: request.system === "preferred" ? "resolved" : "hold", usage: usage(1, 1) };
+      }
+    };
+
+    const result = await replay.search<string>({
+      atStep: modelStep,
+      model: liveModel,
+      strategy: "alpha-zero",
+      budget: { maxRollouts: 1 },
+      actions: [
+        { id: "low-prior", prior: 0.01, overrides: { system: "ignored" } },
+        { id: "high-prior", prior: 0.99, overrides: { system: "preferred" } }
+      ],
+      score: ({ result: forkResult }) => (forkResult === "resolved" ? 1 : 0)
+    });
+
+    expect(captured[0]).toMatchObject({ system: "preferred" });
+    expect(result.best).toMatchObject({
+      action: expect.objectContaining({ id: "high-prior" }),
+      prior: 0.99,
+      score: 1
+    });
+  });
+
+  it("trajectory search keeps exploring when an MCTS branch has no deeper actions", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-terminal-branch",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-terminal-branch"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const liveModel = {
+      async create() {
+        return { content: "ok", usage: usage(1, 1) };
+      }
+    };
+
+    const result = await replay.search<string>({
+      atStep: modelStep,
+      model: liveModel,
+      strategy: "mcts",
+      // explorationWeight 3 forces UCT to re-simulate the terminal "alpha" branch once and
+      // then explore the deeper "beta" branch instead of stopping at the dead end.
+      budget: { maxRollouts: 4, maxDepth: 2, explorationWeight: 3 },
+      actions: ({ depth, parent }) => {
+        if (depth === 1) {
+          return [
+            { id: "alpha", overrides: { system: "alpha" } },
+            { id: "beta", overrides: { system: "beta" } }
+          ];
+        }
+        // The "alpha" branch is terminal: it has no depth-2 actions.
+        return parent?.action?.id === "beta" ? [{ id: "beta-deep", overrides: { model: "deep" } }] : [];
+      },
+      score: ({ actionSequence }) => {
+        const ids = actionSequence.map((action) => action.id);
+        if (ids.includes("beta-deep")) return 1;
+        if (ids.includes("alpha")) return 0.8;
+        if (ids.includes("beta")) return 0.4;
+        return 0;
+      }
+    });
+
+    // The dead-end branch did not stop the whole search; the budget was spent and the deeper
+    // branch was discovered.
+    expect(result.rollouts).toBe(4);
+    expect(result.stoppedReason).toBe("maxRollouts");
+    expect(result.best?.score).toBe(1);
+    expect(result.best?.actionSequence.map((action) => action.id)).toEqual(["beta", "beta-deep"]);
+
+    // The terminal "alpha" branch was re-simulated as a leaf rather than returning undefined.
+    const alphaNodes = result.nodes.filter((node) => node.action?.id === "alpha");
+    expect(alphaNodes).toHaveLength(2);
+    expect(alphaNodes.at(-1)?.visits).toBe(2);
+
+    const branchBySequence = new Map(result.diagnostics.branches.map((branch) => [branch.actionSequence.join(" > "), branch]));
+    expect(result.diagnostics.branches[0]).toMatchObject({ actionSequence: ["beta", "beta-deep"], visits: 1, meanScore: 1 });
+    expect(result.diagnostics.branches[0]?.key).toMatch(/^beta#.+ > beta-deep#/);
+    expect(branchBySequence.get("alpha")).toMatchObject({ visits: 2, valueSum: 1.6, meanScore: 0.8 });
+    expect(branchBySequence.get("beta")).toMatchObject({ visits: 1, meanScore: 0.4 });
+  });
+
+  it("trajectory search treats a missing AlphaZero prior as 0 when any sibling sets one", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-mixed-priors",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-mixed-priors"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const captured: NormalizedRequest[] = [];
+    const liveModel = {
+      async create(raw: unknown) {
+        const request = raw as NormalizedRequest;
+        captured.push(request);
+        return { content: request.system, usage: usage(1, 1) };
+      }
+    };
+
+    const result = await replay.search<string>({
+      atStep: modelStep,
+      model: liveModel,
+      strategy: "alpha-zero",
+      budget: { maxRollouts: 2, maxDepth: 1 },
+      actions: [
+        { id: "explicit", prior: 0.8, overrides: { system: "explicit" } },
+        { id: "omitted", overrides: { system: "omitted" } }
+      ],
+      score: ({ result: forkResult }) => (forkResult === "explicit" ? 1 : 0)
+    });
+
+    // The explicit prior is normalized to 1.0 and the omitted prior to 0, so the explicit
+    // action expands first instead of the old behavior that handed the omitted action 0.556.
+    expect(captured[0]).toMatchObject({ system: "explicit" });
+    expect(result.rollouts).toBe(2);
+    const explicitNode = result.nodes.find((node) => node.action?.id === "explicit");
+    const omittedNode = result.nodes.find((node) => node.action?.id === "omitted");
+    expect(explicitNode?.prior).toBe(1);
+    expect(omittedNode?.prior).toBe(0);
+    expect(result.best).toMatchObject({ action: expect.objectContaining({ id: "explicit" }), prior: 1, score: 1 });
+  });
+
+  it("trajectory search validates Monte Carlo random values", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-random-validation",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-random-validation"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const liveModel = {
+      async create(raw: unknown) {
+        const request = raw as NormalizedRequest;
+        return { content: request.system, usage: usage(1, 1) };
+      }
+    };
+    const actions: TrajectorySearchAction[] = [
+      { id: "first", overrides: { system: "first" } },
+      { id: "second", overrides: { system: "second" } }
+    ];
+
+    const selectedLast = await replay.search<string>({
+      atStep: modelStep,
+      model: liveModel,
+      strategy: "monte-carlo",
+      budget: { maxRollouts: 1, maxDepth: 1 },
+      random: () => 0.999,
+      actions,
+      score: ({ action }) => (action?.id === "second" ? 1 : 0)
+    });
+    expect(selectedLast.rollouts).toBe(1);
+    expect(selectedLast.best?.action?.id).toBe("second");
+
+    // Out-of-contract random values fail fast with an actionable message instead of
+    // silently biasing the sample or indexing past the candidate array.
+    await expect(
+      replay.search<string>({
+        atStep: modelStep,
+        model: liveModel,
+        strategy: "monte-carlo",
+        budget: { maxRollouts: 1, maxDepth: 1 },
+        random: () => 1,
+        actions,
+        score: ({ action }) => (action?.id === "second" ? 1 : 0)
+      })
+    ).rejects.toThrow(/random\(\) must return a finite number/);
+  });
+
+  it("trajectory search reports branch diagnostics for beam sweeps", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-diagnostics",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-diagnostics"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const liveModel = {
+      async create(raw: unknown) {
+        const request = raw as NormalizedRequest;
+        return { content: request.system, usage: usage(1, 1) };
+      }
+    };
+
+    const result = await replay.search<string>({
+      atStep: modelStep,
+      model: liveModel,
+      strategy: "beam",
+      budget: { maxRollouts: 2 },
+      actions: [
+        { id: "hold", overrides: { system: "hold" } },
+        { id: "escalate", overrides: { system: "escalate" } }
+      ],
+      score: ({ result: forkResult }) => (forkResult === "escalate" ? 1 : 0)
+    });
+
+    expect(result.diagnostics.strategy).toBe("beam");
+    expect(result.diagnostics.rollouts).toBe(2);
+    expect(result.diagnostics.branches).toEqual([
+      expect.objectContaining({
+        actionSequence: ["escalate"],
+        depth: 1,
+        visits: 1,
+        valueSum: 1,
+        meanScore: 1,
+        minScore: 1,
+        maxScore: 1,
+        passCount: 1,
+        passRate: 1
+      }),
+      expect.objectContaining({
+        actionSequence: ["hold"],
+        depth: 1,
+        visits: 1,
+        valueSum: 0,
+        meanScore: 0,
+        minScore: 0,
+        maxScore: 0,
+        passCount: 0,
+        passRate: 0
+      })
+    ]);
+    expect(result.diagnostics.branches[0]?.key).toMatch(/^escalate#/);
+    expect(result.bestBranch).toMatchObject({ actionSequence: ["escalate"], meanScore: 1 });
+  });
+
+  it("trajectory search helpers run prompt sweeps and regression scoring with stable action keys", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-helpers",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-helpers"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const callbacks: string[] = [];
+    const liveModel = {
+      async create(raw: unknown) {
+        const request = raw as NormalizedRequest;
+        return { content: request.system?.includes("escalate") ? "escalate-to-csm" : "hold", usage: usage(1, 1) };
+      }
+    };
+
+    const result = await search.promptSweep<string>(replay, {
+      atStep: modelStep,
+      model: liveModel,
+      strategy: "beam",
+      concurrency: 2,
+      rateLimit: { maxStarts: 10 },
+      prompts: [
+        { id: "route", label: "Hold", system: "keep holding", metadata: { family: "baseline" } },
+        { id: "route", label: "Escalate", system: "escalate enterprise refunds", metadata: { family: "fix" } }
+      ],
+      score: ({ result: forkResult }) => ({
+        score: forkResult === "escalate-to-csm" ? 1 : 0,
+        reason: String(forkResult),
+        metadata: { output: String(forkResult) }
+      }),
+      onRollout: (event) => {
+        callbacks.push(`${event.status}:${event.rollout}`);
+      },
+      onNode: (node) => {
+        callbacks.push(`node:${node.rollout}`);
+      },
+      onBest: (node) => {
+        callbacks.push(`best:${node.action?.label}`);
+      }
+    });
+
+    expect(result.best).toMatchObject({ action: expect.objectContaining({ label: "Escalate" }), score: 1 });
+    expect(result.bestBranch).toMatchObject({ actionSequence: ["route"], meanScore: 1, passRate: 1 });
+    expect(result.diagnostics.branches).toHaveLength(2);
+    expect(new Set(result.diagnostics.branches.map((branch) => branch.key)).size).toBe(2);
+    expect(result.diagnostics.branches.every((branch) => branch.key.startsWith("route#"))).toBe(true);
+    expect(callbacks).toEqual(expect.arrayContaining(["start:1", "start:2", "node:1", "node:2", "best:Escalate"]));
+
+    const regression = await search.regression<string>(replay, {
+      atStep: modelStep,
+      model: liveModel,
+      actions: [{ id: "fixed", overrides: { system: "escalate enterprise refunds" } }],
+      assertions: [
+        ({ result: forkResult }) => ({ pass: forkResult === "escalate-to-csm", reason: String(forkResult) }),
+        ({ trace }) => trace.reached("missing") === false
+      ]
+    });
+    expect(regression.best).toMatchObject({ score: 1, reason: "escalate-to-csm | check 2: pass" });
+  });
+
+  it("trajectory search judge helper redacts, caches, and reports judge usage separately", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("secret customer route"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-judge",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-judge"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+    const rubric = search.defineJudgeRubric({
+      name: "support routing",
+      goal: "Prefer an escalation route for enterprise refund exceptions.",
+      criteria: ["The output routes to a CSM instead of leaving the customer waiting."]
+    });
+    const cache = search.createMemoryJudgeCache();
+    const judgeInputs: string[] = [];
+
+    const result = await search.judge<string>(replay, {
+      atStep: modelStep,
+      strategy: "ucb",
+      budget: { maxRollouts: 2, explorationWeight: 0 },
+      model: fakeModel([
+        { content: "secret escalate-to-csm", usage: usage(2, 3) },
+        { content: "secret escalate-to-csm", usage: usage(2, 3) }
+      ]),
+      actions: [{ id: "candidate", overrides: { system: "secret escalation policy" } }],
+      rubric,
+      cache,
+      redact: (value) => value.replace(/secret/g, "[redacted]"),
+      judge: async (input) => {
+        judgeInputs.push(JSON.stringify(input));
+        return {
+          score: input.outputText.includes("escalate-to-csm") ? 1 : 0,
+          reason: "judge accepted escalation",
+          confidence: 0.9,
+          criteria: [{ id: "criterion-1", pass: true, score: 1 }],
+          metadata: { redacted: !JSON.stringify(input).includes("secret") },
+          usage: { inputTokens: 11, outputTokens: 7, costUsd: 0.01 }
+        };
+      }
+    });
+
+    expect(result.rollouts).toBe(2);
+    expect(judgeInputs).toHaveLength(1);
+    expect(judgeInputs[0]).not.toContain("secret");
+    expect(result.tokensSpent).toEqual({ inputTokens: 4, outputTokens: 6 });
+    expect(result.judgeUsage).toEqual({ inputTokens: 11, outputTokens: 7, costUsd: 0.01 });
+    expect(result.nodes.filter((node) => node.id !== "root").map((node) => node.scoreMetadata)).toEqual([
+      expect.objectContaining({ judge: expect.objectContaining({ cacheHit: false }) }),
+      expect.objectContaining({ judge: expect.objectContaining({ cacheHit: true }) })
+    ]);
+  });
+
+  it("trajectory search can continue after rollout errors and persists search metadata", async () => {
+    const store = await tempStore();
+    const harness = async (ctx: AgentContext) => {
+      const response = await ctx.model.create<NormalizedResponse>({ ...req("route this ticket"), system: "baseline" }, { site: "decision" });
+      return response.content;
+    };
+    const record = AgentRewind.record({
+      id: "trajectory-search-errors",
+      store,
+      model: fakeModel([{ content: "hold", usage: usage(1, 1) }]),
+      codec
+    });
+    await record.run(harness);
+    await record.close();
+
+    const replay = await AgentRewind.replay(join(store, "trajectory-search-errors"), { codec });
+    await replay.run(harness);
+    const modelStep = replay.events().find((event) => event.kind === "model_call")?.step ?? -1;
+
+    const result = await replay.search<string>({
+      atStep: modelStep,
+      strategy: "beam",
+      onRolloutError: "continue",
+      persist: { id: "search-errors" },
+      actions: [
+        {
+          id: "bad-model",
+          model: {
+            async create() {
+              throw new Error("provider exploded");
+            }
+          }
+        },
+        { id: "good-model", model: fakeModel([{ content: "resolved", usage: usage(2, 3) }]) }
+      ],
+      score: ({ result: forkResult }) => (forkResult === "resolved" ? { score: 1, reason: "resolved", metadata: { route: "ok" } } : 0)
+    });
+
+    expect(result.searchId).toBe("search-errors");
+    expect(result.searchPath).toBe(join(store, "searches", "search-errors.json"));
+    expect(result.rollouts).toBe(2);
+    expect(result.nodes.find((node) => node.action?.id === "bad-model")).toMatchObject({
+      error: expect.objectContaining({ message: "provider exploded" })
+    });
+    expect(result.best).toMatchObject({ action: expect.objectContaining({ id: "good-model" }), score: 1 });
+
+    const manifest = JSON.parse(await readFile(result.searchPath!, "utf8"));
+    expect(manifest).toMatchObject({
+      searchId: "search-errors",
+      parentSessionId: "trajectory-search-errors",
+      bestSessionId: result.best?.sessionId,
+      nodes: expect.arrayContaining([
+        expect.objectContaining({ action: expect.objectContaining({ id: "bad-model" }), error: expect.objectContaining({ message: "provider exploded" }) }),
+        expect.objectContaining({ action: expect.objectContaining({ id: "good-model" }), scoreMetadata: { route: "ok" } })
+      ])
+    });
+
+    const child = await readSession(result.best!.sessionPath!);
+    expect(child.meta.search).toMatchObject({
+      searchId: "search-errors",
+      parentSessionId: "trajectory-search-errors",
+      nodeId: result.best?.id,
+      actionSequence: ["good-model"],
+      score: 1
+    });
   });
 
   it("fork records tail entropy into the child session", async () => {

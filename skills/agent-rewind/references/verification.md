@@ -122,14 +122,17 @@ agentrewind tool latest --store .rewind --name lookupCustomer
 agentrewind tool latest --store .rewind --name lookupCustomer --json
 agentrewind entropy latest --store .rewind --source uuid
 agentrewind fork latest --store .rewind --site decision-name --system "Try the corrected prompt." --dry-run
+agentrewind search latest --store .rewind --site decision-name --candidate "Fixed::Try the corrected prompt." --goal-contains "expected" --dry-run
+agentrewind search report <search-id> --store .rewind
+agentrewind search promote <winning-child> --out /tmp/agentrewind-regression.json
 agentrewind pack latest demo.rewind --store .rewind
 agentrewind unpack demo.rewind unpacked-demo
 test ! -e unpacked-demo/vault.enc
 ```
 
-Use `--site`, `--from-site`, and `--to-site` for named model calls. Use strict numeric step values from `inspect` when a site repeats. For fork dry runs, add `--check-provider` only when you want the command to validate provider credentials and client setup.
+Use `--site`, `--from-site`, and `--to-site` for named model calls. Use strict numeric step values from `inspect` when a site repeats. For fork/search dry runs, add `--check-provider` only when you want the command to validate provider credentials and client setup.
 
-For deterministic CI fork tests, point `--provider openai-compatible --base-url <local-test-server>` at a local OpenAI-compatible test endpoint and use `--api-key-env` with a throwaway env var.
+For deterministic CI fork/search tests, point `--provider openai-compatible --base-url <local-test-server>` at a local OpenAI-compatible test endpoint and use `--api-key-env` with a throwaway env var.
 
 ## Live Smoke Env File
 
@@ -176,6 +179,11 @@ For each provider smoke test:
 - The forked child replays with the full matching harness, and prefix tools are
   not called again. For prompt fixes, the matching harness includes the updated
   prompt code that the fork tested.
+- Search ranks multiple candidates, respects budget settings, reports the best
+  child, reports `bestBranch` for aggregate branch selection when relevant,
+  writes a persisted report, and can promote the winning child into a regression
+  fixture.
+  child session, and the winning child replays with the full matching harness.
 - The response prefix can be printed, but never print keys or full env.
 
 For OpenRouter first-class support, test both create and stream when possible:

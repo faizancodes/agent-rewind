@@ -1,6 +1,7 @@
 import {
   AgentRewind,
   assertProviderCodec,
+  search as searchHelpers,
   diffPromptContext,
   readEntropyDraw,
   readPromptContext,
@@ -17,6 +18,8 @@ import {
   type ReplayRunOptions,
   type SessionSummary,
   type SessionTimelineRow,
+  type TrajectorySearchResult,
+  type JsonValue,
   type ToolCallInspectionOptions
 } from "../src/index.js";
 
@@ -51,6 +54,34 @@ async function publicReplayReturnType() {
     harness: async (ctx) => {
       await ctx.model.create({ model: "m", messages: [], params: {} });
     }
+  });
+  const search: TrajectorySearchResult<string> = await replay.search<string>({
+    atStep: 0,
+    model,
+    strategy: "alpha-zero",
+    budget: { maxRollouts: 3, maxDepth: 2, explorationWeight: 1, puctExploration: 1.5 },
+    actions: [{ id: "candidate", prior: 0.8, overrides: { system: "Try a different prompt." } }],
+    score: ({ result }) => (result === "ok" ? 1 : 0)
+  });
+  search.best?.score?.toFixed();
+  const json: JsonValue = { ok: true };
+  const rubric = searchHelpers.defineJudgeRubric({
+    name: "routing",
+    goal: "Pick the correct route.",
+    criteria: ["Correct route"]
+  });
+  await searchHelpers.promptSweep<string>(replay, {
+    atStep: 0,
+    model,
+    prompts: ["try a clearer prompt"],
+    score: ({ result }) => ({ score: result === "ok" ? 1 : 0, metadata: json })
+  });
+  await searchHelpers.judge<string>(replay, {
+    atStep: 0,
+    model,
+    actions: [{ id: "candidate", metadata: json }],
+    rubric,
+    judge: async () => ({ score: 1, reason: "passes", usage: { inputTokens: 1, outputTokens: 1 } })
   });
 
   // @ts-expect-error Loaded replay storage is an implementation detail, not public API.

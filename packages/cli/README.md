@@ -29,6 +29,10 @@ agentrewind diff <session> --from <a> --to <b>
 agentrewind diff <session> --from-site <a> --to-site <b>
 agentrewind fork <session> --site <name> --system "Updated system prompt"
 agentrewind fork latest --store .rewind --step <n> --model <model-id>
+agentrewind search <session> --site <name> --candidate "Label::System prompt" --goal-contains <text>
+agentrewind search <session> --site <name> --actions candidates.json --goal-json '$.route=escalate-to-csm'
+agentrewind search <session> --site <name> --candidate "Label::System prompt" --scorer ./score.mjs
+agentrewind search latest --store .rewind --step <n> --actions candidates.json --strategy beam
 agentrewind tool <session>
 agentrewind tool <session> --name <tool>
 agentrewind tool <session> --step <n>
@@ -93,6 +97,32 @@ arw inspect <session>
   complete child session: recorded prefix boundaries keep
   `provenance=recorded`, live tail model calls get `provenance=live`, and the
   child can be inspected or replayed as one complete trajectory.
+- `search` runs several fork rollouts from the same recorded model-call step and
+  ranks them. Use repeated `--candidate "label::system prompt"` flags for quick
+  prompt sweeps, or `--actions candidates.json` for structured candidates shaped
+  like `{ "id": "escalate", "label": "Escalate", "system": "...", "model": "...", "prior": 0.8 }`.
+  Score candidates with `--goal-contains <text>`, `--goal-regex <pattern>`,
+  `--goal-json path=value` / `--goal-json $.path=value`,
+  `--goal-tool <name>`, or `--scorer ./score.mjs`.
+  A scorer module exports `default function score(ctx)` or `score(ctx)` and can
+  implement project-specific checks or LLM-as-a-judge scoring. Use `--strategy
+  beam` for deterministic candidate sweeps, `--strategy monte-carlo` for sampled
+  rollouts, `--strategy ucb` for repeated bandit sampling, or `--strategy mcts`
+  / `--strategy alpha-zero` for tree-search rollouts. Search uses the same
+  provider flags as `fork`; each rollout writes a child session, writes a
+  `<store>/searches/<search-id>.json` manifest, and prints the best child path.
+  Add `--concurrency <n>` for independent beam expansions, `--retry-attempts
+  <n>` for transient provider/scorer failures, `--rate-limit <n>` to cap
+  rollout starts per second, and `--best-branch-by mean|lower-confidence-bound|pass-rate`
+  when stochastic candidates should be selected by aggregate branch behavior
+  instead of the single highest rollout.
+  Use `agentrewind search report <search-id>` to reopen a persisted manifest and
+  `agentrewind search promote <child>` to write a regression fixture from a
+  winning child session.
+  For SDK scoring patterns, read `docs/trajectory-scoring.md` in the repository. For strategy details,
+  including `beam`, `monte-carlo`, `ucb`, `mcts`, `alpha-zero`, depth, priors,
+  and budgets, read
+  `docs/trajectory-search-strategies.md`.
 - `tool` prints a readable recorded tool call by default. Add `--json` for
   `args`, `result`, `error`, stream chunks, latency, and provenance as JSON.
   Use `--name` when the tool appears once, or `--step` after `inspect` when a

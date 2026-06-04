@@ -534,6 +534,7 @@ agentrewind inspect .rewind/openai-demo --json
 agentrewind context .rewind/openai-demo
 agentrewind prompt .rewind/openai-demo --site answer-question
 agentrewind fork .rewind/openai-demo --site answer-question --system "Prefer policy-backed answers."
+agentrewind search .rewind/openai-demo --site answer-question --candidate "Escalate::Prefer policy-backed escalation." --candidate "Hold::Ask for more context." --goal-contains "escalate"
 agentrewind entropy .rewind/openai-demo --source uuid
 agentrewind pack .rewind/openai-demo openai-demo.rewind
 agentrewind unpack openai-demo.rewind unpacked-demo
@@ -594,6 +595,15 @@ Successful forks write a normal child session next to the parent. The child
 contains the recorded prefix boundaries with `provenance: "recorded"` and the
 new tail boundaries with `provenance: "live"` or `provenance: "stub"`, so
 `agentrewind inspect <child>` shows the complete forked trajectory.
+
+`search` runs multiple fork rollouts from the same model-call step and ranks
+them. Use repeated `--candidate "label::system prompt"` flags for quick prompt
+sweeps, or `--actions candidates.json` for structured `{ id, label, system,
+model, prior }` candidates. The built-in CLI scorer is intentionally simple:
+`--goal-contains <text>` gives a rollout score of `1` when the live model output
+contains that text. Use `--strategy beam` for deterministic candidate sweeps or
+`--strategy monte-carlo`, `ucb`, `mcts`, or `alpha-zero` when you need sampled,
+bandit, or tree-search rollouts.
 
 ## Forking
 
@@ -662,6 +672,84 @@ pnpm test:provider-forks
 To smoke test against live provider APIs, export the relevant API keys and model
 ids, then run `pnpm test:live:provider-forks`. The live suite is opt-in and
 skips providers whose key/model variables are not present.
+
+## Trajectory Search
+
+Trajectory search automates repeated forks from one recorded decision point.
+Use it when a bad agent run has a clear goal, but you want to compare several
+prompt/model/tool-policy candidates without rerunning the recorded prefix.
+
+The CLI path is useful for provider-backed prompt sweeps:
+
+```sh
+agentrewind search .rewind/support-router \
+  --site refund-routing-decision \
+  --provider openrouter \
+  --model openai/gpt-4o-mini \
+  --candidate "Escalate::Enterprise refund exceptions should escalate-to-csm." \
+  --candidate "Hold::Ask the customer to wait for policy review." \
+  --goal-contains "escalate-to-csm" \
+  --strategy beam
+```
+
+CLI search can also score with `--goal-regex`, `--goal-json path=value`,
+`--goal-tool <name>`, or `--scorer ./score.mjs` for custom scoring such as
+LLM-as-a-judge.
+
+The SDK path gives you helpers for common searches plus access to each child
+trace when you need custom scoring:
+
+```ts
+import { AgentRewind, search } from "@agentrewind/sdk";
+
+const replay = await AgentRewind.replay(".rewind/support-router", { codec, model });
+await replay.run(harness);
+
+const result = await search.promptSweep(replay, {
+  atStep: 2,
+  harness,
+  model,
+  prompts: [
+    { id: "hold", label: "Hold", system: "Ask for more context." },
+    { id: "escalate", label: "Escalate", system: "Enterprise exceptions escalate-to-csm." }
+  ],
+  strategy: "beam",
+  concurrency: 2,
+  bestBranchBy: "mean",
+  budget: { maxRollouts: 3, stopScore: 1 },
+  score: ({ result, trace }) => ({
+    score: String(result).includes("escalate-to-csm") ? 1 : 0,
+    reason: `events=${trace.events().length}`
+  })
+});
+
+console.log(result.best?.action?.id, result.best?.score, result.best?.sessionPath);
+console.log(result.bestBranch?.meanScore, result.searchPath);
+```
+
+Each rollout writes a normal fork child session, and search writes a manifest
+under `<store>/searches/` with node scores, reasons, errors, diagnostics, and
+best-child metadata. Inspect the report later with:
+
+```sh
+agentrewind search report <search-id>
+agentrewind search promote <winning-child> --out tests/fixtures/support-router.regression.json
+```
+
+Use `search.modelSweep()` to compare model IDs, `search.regression()` to score
+assertions, or `search.judge()` with `search.defineJudgeRubric()` for
+LLM-as-a-judge scoring with redaction, caching, structured output, and separate
+judge token/cost reporting. If an action changes the prompt or model request,
+replay the winning child with the updated harness code that now builds that
+request. See `examples/trajectory-search-prompt-sweep/index.mjs` for a complete
+runnable prompt-sweep example. For detailed scoring patterns, including parsed
+JSON, tool-call scoring, cost-adjusted scoring, multi-objective scoring, and
+LLM-as-a-judge natural-language metrics, read
+[Trajectory search scoring strategies](docs/trajectory-scoring.md). For
+detailed search mechanics, including beam search, Monte Carlo search,
+UCB, MCTS, AlphaZero-style PUCT, multi-depth action sequences, budgets, priors,
+and dynamic action generation, read
+[Trajectory search strategy guide](docs/trajectory-search-strategies.md).
 
 ## Redaction
 

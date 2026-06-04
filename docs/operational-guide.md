@@ -191,3 +191,50 @@ points back to the parent recording, and the child can be strictly replayed with
 the full matching harness when the same recorded prefix tools and agent code
 shape are available. For prompt/model fixes, that usually means the updated
 harness code now builds the request that the fork tested.
+
+## Trajectory Search Workflow
+
+Use search when a single fork is not enough and you have a clear scoring rule.
+Search runs multiple fork rollouts from the same recorded step and writes a
+child session for each candidate.
+
+CLI prompt sweep:
+
+```sh
+agentrewind search .rewind/support-bot \
+  --site classify-ticket \
+  --candidate "Escalate::Enterprise support exceptions should escalate-to-csm." \
+  --candidate "Hold::Ask for more evidence before escalation." \
+  --goal-contains "escalate-to-csm" \
+  --strategy beam
+```
+
+For larger candidate sets, put them in JSON:
+
+```json
+[
+  { "id": "escalate", "label": "Escalate enterprise exceptions", "system": "Enterprise exceptions should escalate-to-csm." },
+  { "id": "hold", "label": "Hold for more context", "system": "Ask for more evidence before escalation." }
+]
+```
+
+Then run:
+
+```sh
+agentrewind search .rewind/support-bot --site classify-ticket --actions candidates.json --goal-json '$.route=escalate-to-csm'
+```
+
+CLI scoring also supports `--goal-contains`, `--goal-regex`, `--goal-tool`, and
+`--scorer ./score.mjs` for project-specific or LLM-as-a-judge checks.
+
+Use `replay.search()` in tests when the scorer needs domain logic from the
+harness result or child trace. Bound spend with `budget.maxRollouts`,
+`budget.maxTokens`, and `budget.stopScore`. Search writes a durable manifest
+under `<store>/searches/` and annotates child session metadata with the search
+id, rollout, action sequence, and score/error. Once the best candidate is
+selected, replay the child session with the fixed harness as the regression
+test. For scoring recipes and LLM-as-a-judge guidance, read
+[Trajectory search scoring strategies](trajectory-scoring.md). For beam,
+Monte Carlo, UCB, MCTS, AlphaZero-style PUCT, multi-depth action generation,
+priors, and budget tuning, read
+[Trajectory search strategy guide](trajectory-search-strategies.md).

@@ -155,6 +155,7 @@ agentrewind inspect .rewind/first-recording --json
 agentrewind context .rewind/first-recording
 agentrewind context .rewind/first-recording --site answer-question
 agentrewind fork .rewind/first-recording --site answer-question --system "Try a safer policy prompt." --dry-run
+agentrewind search .rewind/first-recording --site answer-question --candidate "Safer::Try a safer policy prompt." --goal-contains "resolved" --dry-run
 agentrewind entropy .rewind/first-recording --source uuid
 agentrewind pack .rewind/first-recording first-recording.rewind
 ```
@@ -227,6 +228,8 @@ need the codec to fingerprint current requests and prepare live fork requests.
   side effects.
 - Use `examples/fork-replay-prompt-fix` when testing prompt/model changes
   against a historical run.
+- Use `examples/trajectory-search-prompt-sweep` when you want to rank several
+  prompt/model changes from the same historical step.
 
 ## Common Mistakes
 
@@ -308,3 +311,56 @@ Add `--dry-run` first when you want to confirm the step and provider without
 making a live model call.
 
 See `examples/fork-replay-prompt-fix` for a copyable script.
+
+## When To Search
+
+Search answers: "Which of these candidate tails best reaches my goal from the
+same recorded decision point?"
+
+Use search after you have a replayable parent session and a measurable outcome,
+such as "model output contains escalate-to-csm" or "the harness result chooses
+the correct route." Search repeatedly forks from the same step, scores each
+child, and returns the best child session.
+
+CLI example for a prompt sweep:
+
+```sh
+agentrewind search latest \
+  --store .rewind \
+  --site answer-question \
+  --candidate "Escalate::Enterprise exceptions should escalate-to-csm." \
+  --candidate "Hold::Ask for more context." \
+  --goal-contains "escalate-to-csm" \
+  --strategy beam
+```
+
+SDK example for a custom scorer:
+
+```ts
+const replay = await AgentRewind.replay("latest", { store: ".rewind", codec });
+await replay.run(harness);
+
+const search = await replay.search({
+  atStep: 2,
+  harness,
+  model,
+  actions: [
+    { id: "hold", overrides: { system: "Ask for more context." } },
+    { id: "escalate", overrides: { system: "Enterprise exceptions escalate-to-csm." } }
+  ],
+  score: ({ result }) => (String(result).includes("escalate-to-csm") ? 1 : 0)
+});
+```
+
+Every rollout writes a forked child session. If the winning action changed the
+prompt or model request, replay that child with the harness code that now builds
+the winning request. Search also writes `<store>/searches/<search-id>.json` with
+node scores, errors, diagnostics, and best-child metadata. The CLI can score
+with `--goal-contains`, `--goal-regex`, `--goal-json`, `--goal-tool`, or a
+custom `--scorer` module. See `examples/trajectory-search-prompt-sweep` for a
+full script, and read [Trajectory search scoring strategies](trajectory-scoring.md)
+when you need parsed JSON, tool-call, cost-adjusted, multi-objective, custom, or
+LLM-as-a-judge scoring. Read
+[Trajectory search strategy guide](trajectory-search-strategies.md) when you
+need to choose between beam search, Monte Carlo, UCB, MCTS, and AlphaZero-style
+PUCT, tune budgets, set priors, or use multi-depth action sequences.

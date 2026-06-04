@@ -124,6 +124,19 @@ export interface SessionMeta {
   id: string;
   parent?: string;
   forkedAtStep?: number;
+  search?: {
+    searchId: string;
+    searchPath: string;
+    parentSessionId: string;
+    atStep: number;
+    rollout: number;
+    nodeId: string;
+    actionSequence: string[];
+    actionSequenceKeys?: string[];
+    score?: number;
+    reason?: string;
+    error?: SerializedError;
+  };
   createdAt: number;
   agentRewindVersion: string;
   schemaVersion: number;

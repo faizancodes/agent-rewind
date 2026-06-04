@@ -43,6 +43,12 @@ model-call step so only the changed tail calls a live model. It also replays
 the forked child session with the full fixed harness, which is the pattern to
 copy for regression tests.
 
+If you want to try more than one fix, read
+`trajectory-search-prompt-sweep/index.mjs` after the fork example. It records
+one bad support-routing run, searches several candidate prompt tails from the
+bad model step, ranks the child sessions with a scorer, and replays the winning
+child as deterministic coverage.
+
 The shortest mental model for a forked replay is:
 
 - Replay the recorded prefix exactly as it happened.
@@ -86,6 +92,27 @@ This is the clearest fork-specific example:
 
 Use this when you need to evaluate prompt/model changes against a real recorded
 agent run without rerunning earlier tools or manually rebuilding context.
+
+## `trajectory-search-prompt-sweep`
+
+Real-world use case: a support-routing agent made the wrong refund decision,
+and you want to compare several prompt fixes against the exact same customer
+ticket and policy snapshot.
+
+This example shows trajectory search:
+
+- Record the original bad decision.
+- Strictly replay the parent session.
+- Search candidate prompt tails from the bad model-call step.
+- Score each forked child by whether it reaches the desired decision.
+- Replay the winning child with the fixed harness for regression coverage.
+
+Use this when one manual fork is too slow and you want beam, Monte Carlo, UCB,
+MCTS, or AlphaZero-style search over possible prompt/model changes. The SDK also
+exposes `search.promptSweep()`, `search.modelSweep()`, `search.regression()`,
+and `search.judge()` helpers for common search setups. For detailed scorer
+patterns, read `docs/trajectory-scoring.md`. For detailed strategy patterns, read
+`docs/trajectory-search-strategies.md`.
 
 ## `openai-compatible-support-bot`
 

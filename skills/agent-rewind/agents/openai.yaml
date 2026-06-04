@@ -1,4 +1,4 @@
 interface:
   display_name: "AgentRewind"
-  short_description: "Record, replay, inspect, and fork agent runs with @agentrewind/sdk"
-  default_prompt: "Use $agent-rewind to add deterministic record/replay/fork support with @agentrewind/sdk provider presets."
+  short_description: "Record, replay, inspect, fork, and search agent runs with @agentrewind/sdk"
+  default_prompt: "Use $agent-rewind to add deterministic record/replay/fork/search support with @agentrewind/sdk provider presets."

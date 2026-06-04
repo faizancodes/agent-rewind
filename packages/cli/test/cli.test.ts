@@ -418,6 +418,450 @@ describe("agentrewind CLI", () => {
     }
   });
 
+  it("search ranks candidate forks through an OpenAI-compatible endpoint", async () => {
+    const store = await mkdtemp(join(tmpdir(), "agentrewind-cli-search-"));
+    const cli = join(process.cwd(), "packages/cli/dist/index.js");
+    const requests: unknown[] = [];
+    const server = createServer((request, response) => {
+      void handleSearchOpenAICompatibleRequest(request, response, requests);
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    const baseURL = `http://127.0.0.1:${address.port}/v1`;
+
+    try {
+      const session = AgentRewind.record({
+        id: "search-parent",
+        store,
+        codec: openaiChatCodec(),
+        model: fakeOpenAIChatModel(
+          chatCompletion("chatcmpl_recorded", "hold", { prompt_tokens: 8, completion_tokens: 2, total_tokens: 10 })
+        )
+      });
+      await session.run(async (ctx) => {
+        await ctx.model.create(
+          {
+            model: "recorded-model",
+            messages: [
+              { role: "system", content: "Route support tickets." },
+              { role: "user", content: "Enterprise refund request." }
+            ],
+            temperature: 0
+          },
+          { site: "classify-ticket" }
+        );
+      });
+      await session.close();
+
+      const sessionPath = join(store, "search-parent");
+      const dryRun = await execFileAsync(
+        "node",
+        [
+          cli,
+          "search",
+          sessionPath,
+          "--site",
+          "classify-ticket",
+          "--provider",
+          "openai-compatible",
+          "--base-url",
+          baseURL,
+          "--api-key-env",
+          "AGENTREWIND_TEST_API_KEY",
+          "--model",
+          "search-model",
+          "--candidate",
+          "Hold::Keep holding enterprise exceptions.",
+          "--candidate",
+          "Escalate::Prefer enterprise escalation.",
+          "--goal-contains",
+          "escalate-to-csm",
+          "--strategy",
+          "alpha-zero",
+          "--max-depth",
+          "2",
+          "--puct-exploration",
+          "2.5",
+          "--dry-run"
+        ],
+        { env: { ...process.env, AGENTREWIND_TEST_API_KEY: "test-key" } }
+      );
+      expect(dryRun.stdout).toContain("AgentRewind search plan.");
+      expect(dryRun.stdout).toContain("Strategy: alpha-zero");
+      expect(dryRun.stdout).toContain("puctExploration=2.5");
+      expect(dryRun.stdout).toContain("Candidates: 2");
+      expect(requests).toHaveLength(0);
+
+      const search = await execFileAsync(
+        "node",
+        [
+          cli,
+          "search",
+          sessionPath,
+          "--site",
+          "classify-ticket",
+          "--provider",
+          "openai-compatible",
+          "--base-url",
+          baseURL,
+          "--api-key-env",
+          "AGENTREWIND_TEST_API_KEY",
+          "--model",
+          "search-model",
+          "--candidate",
+          "Hold::Keep holding enterprise exceptions.",
+          "--candidate",
+          "Escalate::Prefer enterprise escalation.",
+          "--goal-contains",
+          "escalate-to-csm",
+          "--json"
+        ],
+        { env: { ...process.env, AGENTREWIND_TEST_API_KEY: "test-key" } }
+      );
+      const payload = JSON.parse(search.stdout);
+      expect(payload).toMatchObject({
+        ok: true,
+        parent: sessionPath,
+        provider: "openai-chat",
+        client: "openai-compatible",
+        strategy: "beam",
+        rollouts: 2,
+        tokensSpent: { inputTokens: 26, outputTokens: 10 },
+        best: {
+          score: 1,
+          action: { id: "escalate", label: "Escalate", overrides: { system: true, model: "search-model" } },
+          reason: "escalate-to-csm"
+        }
+      });
+      expect(payload.best.sessionPath).toEqual(expect.stringContaining(join(store, "")));
+      expect(payload.searchId).toBeTruthy();
+      expect(payload.searchPath).toBe(join(store, "searches", `${payload.searchId}.json`));
+      expect(payload.bestBranch).toMatchObject({ actionSequence: ["escalate"], meanScore: 1, passRate: 1 });
+      expect(payload.nextCommands).toEqual(expect.arrayContaining([`agentrewind inspect ${payload.best.sessionPath}`]));
+
+      expect(requests).toHaveLength(2);
+      expect(requests[0]).toMatchObject({
+        model: "search-model",
+        messages: expect.arrayContaining([{ role: "system", content: "Keep holding enterprise exceptions." }])
+      });
+      expect(requests[1]).toMatchObject({
+        model: "search-model",
+        messages: expect.arrayContaining([{ role: "system", content: "Prefer enterprise escalation." }])
+      });
+
+      const child = await readSession(payload.best.sessionPath);
+      expect(child.meta).toMatchObject({
+        parent: "search-parent",
+        provider: "openai-chat",
+        search: expect.objectContaining({
+          searchId: payload.searchId,
+          actionSequence: ["escalate"],
+          actionSequenceKeys: expect.arrayContaining([expect.stringMatching(/^escalate#/)])
+        })
+      });
+      expect(child.events.some((event) => event.kind === "model_call" && event.provenance === "live")).toBe(true);
+
+      const report = await execFileAsync("node", [cli, "search", "report", payload.searchId, "--store", store, "--json"]);
+      expect(JSON.parse(report.stdout)).toMatchObject({
+        ok: true,
+        searchId: payload.searchId,
+        bestSessionPath: payload.best.sessionPath,
+        bestBranch: expect.objectContaining({ actionSequence: ["escalate"] })
+      });
+
+      const fixturePath = join(store, "regressions", "winner.json");
+      const promoted = await execFileAsync("node", [
+        cli,
+        "search",
+        "promote",
+        payload.best.sessionPath,
+        "--out",
+        fixturePath,
+        "--json"
+      ]);
+      const fixture = JSON.parse(promoted.stdout);
+      expect(fixture).toMatchObject({
+        ok: true,
+        fixturePath,
+        childSessionPath: payload.best.sessionPath,
+        searchId: payload.searchId,
+        actionSequence: ["escalate"],
+        expected: { score: 1, reason: "escalate-to-csm" }
+      });
+      expect(JSON.parse(await readFile(fixturePath, "utf8"))).toMatchObject({
+        schema: "agentrewind.search-regression-fixture",
+        childSessionPath: payload.best.sessionPath,
+        actionSequence: ["escalate"]
+      });
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("search executes ucb, mcts, and alpha-zero strategies against a live endpoint", async () => {
+    const store = await mkdtemp(join(tmpdir(), "agentrewind-cli-search-strategies-"));
+    const cli = join(process.cwd(), "packages/cli/dist/index.js");
+    const server = createServer((request, response) => {
+      void handleSearchOpenAICompatibleRequest(request, response, []);
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    const baseURL = `http://127.0.0.1:${address.port}/v1`;
+    const env = { ...process.env, AGENTREWIND_TEST_API_KEY: "test-key" };
+
+    try {
+      const session = AgentRewind.record({
+        id: "search-strategies-parent",
+        store,
+        codec: openaiChatCodec(),
+        model: fakeOpenAIChatModel(
+          chatCompletion("chatcmpl_recorded", "hold", { prompt_tokens: 8, completion_tokens: 2, total_tokens: 10 })
+        )
+      });
+      await session.run(async (ctx) => {
+        await ctx.model.create(
+          {
+            model: "recorded-model",
+            messages: [
+              { role: "system", content: "Route support tickets." },
+              { role: "user", content: "Enterprise refund request." }
+            ],
+            temperature: 0
+          },
+          { site: "classify-ticket" }
+        );
+      });
+      await session.close();
+      const sessionPath = join(store, "search-strategies-parent");
+
+      const baseArgs = (strategy: string) => [
+        cli,
+        "search",
+        sessionPath,
+        "--site",
+        "classify-ticket",
+        "--provider",
+        "openai-compatible",
+        "--base-url",
+        baseURL,
+        "--api-key-env",
+        "AGENTREWIND_TEST_API_KEY",
+        "--model",
+        "search-model",
+        "--strategy",
+        strategy,
+        "--max-rollouts",
+        "3",
+        "--candidate",
+        "Hold::Keep holding enterprise exceptions.",
+        "--candidate",
+        "Escalate::Prefer enterprise escalation.",
+        "--goal-contains",
+        "escalate-to-csm",
+        "--json"
+      ];
+
+      // UCB really runs three rollouts and revisits the winning arm.
+      const ucb = JSON.parse((await execFileAsync("node", baseArgs("ucb"), { env })).stdout);
+      expect(ucb).toMatchObject({
+        ok: true,
+        strategy: "ucb",
+        rollouts: 3,
+        best: { score: 1, action: { id: "escalate" } }
+      });
+      expect(ucb.nodes.filter((node: { action: { id: string } }) => node.action.id === "escalate")).toHaveLength(2);
+      // Forced first-time exploration omits selectionScore and records a JSON-safe selectionReason.
+      expect(ucb.nodes.some((node: { selectionReason?: string }) => node.selectionReason === "unvisited")).toBe(true);
+      expect(
+        ucb.nodes.every((node: { selectionScore?: number }) => node.selectionScore === undefined || Number.isFinite(node.selectionScore))
+      ).toBe(true);
+      expect(ucb.diagnostics).toMatchObject({
+        strategy: "ucb",
+        rollouts: 3,
+        branches: expect.arrayContaining([expect.objectContaining({ actionSequence: ["escalate"], visits: 2, meanScore: 1 })])
+      });
+      expect(ucb.diagnostics.branches.find((branch: { actionSequence: string[] }) => branch.actionSequence[0] === "escalate")?.key).toMatch(/^escalate#/);
+
+      // MCTS over a flat candidate list (no dynamic generators on the CLI) also revisits the winner.
+      const mcts = JSON.parse((await execFileAsync("node", baseArgs("mcts"), { env })).stdout);
+      expect(mcts).toMatchObject({
+        ok: true,
+        strategy: "mcts",
+        rollouts: 3,
+        best: { score: 1, action: { id: "escalate" } }
+      });
+      expect(mcts.diagnostics.branches).toEqual(
+        expect.arrayContaining([expect.objectContaining({ actionSequence: ["escalate"], visits: 2, meanScore: 1 })])
+      );
+
+      // AlphaZero expands the higher-prior candidate first using a priors actions file.
+      const actionsFile = join(store, "alpha-actions.json");
+      await writeFile(
+        actionsFile,
+        JSON.stringify([
+          { id: "escalate", label: "Escalate", system: "Prefer enterprise escalation.", prior: 0.8 },
+          { id: "hold", label: "Hold", system: "Keep holding enterprise exceptions.", prior: 0.2 }
+        ]),
+        "utf8"
+      );
+      const alphaZero = JSON.parse(
+        (
+          await execFileAsync(
+            "node",
+            [
+              cli,
+              "search",
+              sessionPath,
+              "--site",
+              "classify-ticket",
+              "--provider",
+              "openai-compatible",
+              "--base-url",
+              baseURL,
+              "--api-key-env",
+              "AGENTREWIND_TEST_API_KEY",
+              "--model",
+              "search-model",
+              "--strategy",
+              "alpha-zero",
+              "--max-rollouts",
+              "1",
+              "--actions",
+              actionsFile,
+              "--goal-contains",
+              "escalate-to-csm",
+              "--json"
+            ],
+            { env }
+          )
+        ).stdout
+      );
+      expect(alphaZero).toMatchObject({
+        ok: true,
+        strategy: "alpha-zero",
+        rollouts: 1,
+        best: { score: 1, prior: 0.8, action: { id: "escalate" } }
+      });
+      const child = await readSession(alphaZero.best.sessionPath);
+      expect(child.events.some((event) => event.kind === "model_call" && event.provenance === "live")).toBe(true);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it("search supports JSON-path and custom scorer module scoring", async () => {
+    const store = await mkdtemp(join(tmpdir(), "agentrewind-cli-search-scorers-"));
+    const cli = join(process.cwd(), "packages/cli/dist/index.js");
+    const server = createServer((request, response) => {
+      void handleSearchJsonOpenAICompatibleRequest(request, response);
+    });
+    await listen(server);
+    const address = server.address() as AddressInfo;
+    const baseURL = `http://127.0.0.1:${address.port}/v1`;
+    const env = { ...process.env, AGENTREWIND_TEST_API_KEY: "test-key" };
+
+    try {
+      const session = AgentRewind.record({
+        id: "search-scorers-parent",
+        store,
+        codec: openaiChatCodec(),
+        model: fakeOpenAIChatModel(
+          chatCompletion("chatcmpl_recorded", JSON.stringify({ route: "hold" }), { prompt_tokens: 8, completion_tokens: 2, total_tokens: 10 })
+        )
+      });
+      await session.run(async (ctx) => {
+        await ctx.model.create(
+          {
+            model: "recorded-model",
+            messages: [
+              { role: "system", content: "Route support tickets." },
+              { role: "user", content: "Enterprise refund request." }
+            ],
+            temperature: 0
+          },
+          { site: "classify-ticket" }
+        );
+      });
+      await session.close();
+      const sessionPath = join(store, "search-scorers-parent");
+
+      const baseArgs = [
+        cli,
+        "search",
+        sessionPath,
+        "--site",
+        "classify-ticket",
+        "--provider",
+        "openai-compatible",
+        "--base-url",
+        baseURL,
+        "--api-key-env",
+        "AGENTREWIND_TEST_API_KEY",
+        "--model",
+        "search-model",
+        "--candidate",
+        "Hold::Keep holding enterprise exceptions.",
+        "--candidate",
+        "Escalate::Prefer enterprise escalation.",
+        "--json"
+      ];
+
+      const jsonScored = JSON.parse(
+        (
+          await execFileAsync("node", [...baseArgs, "--goal-json", "$.route=escalate-to-csm"], {
+            env
+          })
+        ).stdout
+      );
+      expect(jsonScored).toMatchObject({
+        ok: true,
+        scoring: 'JSON output route equals "escalate-to-csm"',
+        best: { score: 1, action: { id: "escalate" } }
+      });
+
+      const regexScored = JSON.parse(
+        (
+          await execFileAsync("node", [...baseArgs, "--goal-regex", "escalate-to-csm"], {
+            env
+          })
+        ).stdout
+      );
+      expect(regexScored).toMatchObject({
+        ok: true,
+        scoring: "live output matches /escalate-to-csm/",
+        best: { score: 1, action: { id: "escalate" } }
+      });
+
+      const scorerFile = join(store, "scorer.mjs");
+      await writeFile(
+        scorerFile,
+        [
+          "function text(value) { return typeof value === 'string' ? value : JSON.stringify(value); }",
+          "export default function score({ trace }) {",
+          "  const output = trace.events().filter((event) => event.kind === 'model_call' && event.provenance === 'live').map((event) => text(event.response?.content)).join('\\n');",
+          "  return { score: output.includes('escalate-to-csm') ? 1 : 0, reason: `custom:${output}` };",
+          "}"
+        ].join("\n"),
+        "utf8"
+      );
+      const customScored = JSON.parse(
+        (
+          await execFileAsync("node", [...baseArgs, "--scorer", scorerFile], {
+            env
+          })
+        ).stdout
+      );
+      expect(customScored).toMatchObject({
+        ok: true,
+        scoring: `custom scorer ${scorerFile}`,
+        best: { score: 1, action: { id: "escalate" } }
+      });
+      expect(customScored.best.reason).toContain("escalate-to-csm");
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it("quickstart prints copyable provider starters", async () => {
     const cli = join(process.cwd(), "packages/cli/dist/index.js");
     const store = await mkdtemp(join(tmpdir(), "agentrewind-cli-quickstart-"));
@@ -595,6 +1039,35 @@ async function handleOpenAICompatibleRequest(
   response.end(
     JSON.stringify(chatCompletion("chatcmpl_forked", "forked decision", { prompt_tokens: 13, completion_tokens: 5, total_tokens: 18 }))
   );
+}
+
+async function handleSearchOpenAICompatibleRequest(
+  request: IncomingMessage,
+  response: ServerResponse,
+  requests: unknown[]
+): Promise<void> {
+  if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+    response.writeHead(404).end();
+    return;
+  }
+  const body = JSON.parse(await readRequestBody(request)) as { messages?: { role?: string; content?: unknown }[] };
+  requests.push(body);
+  const system = body.messages?.find((message) => message.role === "system")?.content;
+  const content = typeof system === "string" && system.includes("escalation") ? "escalate-to-csm" : "hold";
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify(chatCompletion("chatcmpl_search", content, { prompt_tokens: 13, completion_tokens: 5, total_tokens: 18 })));
+}
+
+async function handleSearchJsonOpenAICompatibleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+    response.writeHead(404).end();
+    return;
+  }
+  const body = JSON.parse(await readRequestBody(request)) as { messages?: { role?: string; content?: unknown }[] };
+  const system = body.messages?.find((message) => message.role === "system")?.content;
+  const route = typeof system === "string" && system.includes("escalation") ? "escalate-to-csm" : "hold";
+  response.writeHead(200, { "content-type": "application/json" });
+  response.end(JSON.stringify(chatCompletion("chatcmpl_search_json", JSON.stringify({ route }), { prompt_tokens: 13, completion_tokens: 5, total_tokens: 18 })));
 }
 
 async function readRequestBody(request: IncomingMessage): Promise<string> {

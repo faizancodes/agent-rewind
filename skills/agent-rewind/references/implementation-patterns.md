@@ -221,6 +221,83 @@ Supported fork tool policy is intentionally narrow:
 
 Do not document live tail tool execution unless the package implements it.
 
+## Trajectory Search
+
+Use search when one manual fork is not enough. Search runs multiple fork
+rollouts from the same recorded step and ranks the child sessions.
+
+CLI prompt sweep:
+
+```sh
+agentrewind search latest \
+  --store .rewind \
+  --site classify-ticket \
+  --candidate "Escalate::Enterprise exceptions should escalate-to-csm." \
+  --candidate "Hold::Ask for more context before escalation." \
+  --goal-contains "escalate-to-csm" \
+  --strategy beam
+```
+
+Use `--actions candidates.json` for structured candidates:
+
+```json
+[
+  { "id": "escalate", "label": "Escalate enterprise", "system": "Enterprise exceptions should escalate-to-csm." },
+  { "id": "hold", "label": "Hold for review", "system": "Ask for more context before escalation." }
+]
+```
+
+SDK search for custom scoring:
+
+```ts
+import { search } from "@agentrewind/sdk";
+
+const replay = await rewind.replay("latest");
+await replay.run(agent.harness);
+
+const result = await search.promptSweep(replay, {
+  atStep: 5,
+  harness: agent.harness,
+  model: rewind.model,
+  strategy: "beam",
+  budget: { maxRollouts: 3, stopScore: 1 },
+  prompts: [
+    { id: "hold", system: "Ask for more context." },
+    { id: "escalate", system: "Enterprise exceptions should escalate-to-csm." }
+  ],
+  score: ({ result, trace }) => ({
+    score: String(result).includes("escalate-to-csm") ? 1 : 0,
+    reason: `events=${trace.events().length}`
+  })
+});
+```
+
+Use `search.modelSweep()`, `search.regression()`, and `search.judge()` for
+model comparisons, assertion-based scoring, and LLM-as-a-judge rubrics. Search
+results include `best` for the highest single rollout and `bestBranch` for
+aggregate branch selection.
+
+Each rollout is a normal fork child session. If the winning action changed the
+prompt or model request, replay the child with harness code that now builds that
+winning request. Do not replay a prompt-overridden child with the old prompt
+harness and expect strict replay to pass.
+
+For persisted search artifacts, use:
+
+```sh
+agentrewind search report <search-id>
+agentrewind search promote <winning-child> --out tests/fixtures/agentrewind.regression.json
+```
+
+For detailed scoring strategies, including parsed JSON, tool-call goals,
+cost-adjusted scoring, multi-objective scoring, and LLM-as-a-judge
+natural-language metrics, load `docs/trajectory-scoring.md` from the repository
+when available.
+For detailed strategy behavior, including beam search, Monte Carlo search, UCB,
+MCTS, AlphaZero-style PUCT, multi-depth action sequences, dynamic action
+generation, priors, and budgets, load
+`docs/trajectory-search-strategies.md` from the repository when available.
+
 ## Redaction And Sharing
 
 Redaction is enabled by default. Add project-specific patterns when needed:

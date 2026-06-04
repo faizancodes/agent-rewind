@@ -50,6 +50,10 @@ counted only for those live tail calls. This is why a child fork created after a
 recorded tool call can be replayed later with a full harness that still starts
 from the original prefix and now produces the forked tail request.
 
+Trajectory search uses the same fork machinery for every rollout, so a custom
+codec that passes fork compatibility also supports `replay.search()` and
+`agentrewind search`.
+
 Run the deterministic provider fork suite with:
 
 ```sh

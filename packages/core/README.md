@@ -41,6 +41,8 @@ Core exports:
   a custom codec is incomplete or cannot normalize/store/rebuild fixtures.
 - `Replay.fork()` for replay-prefix/live-tail forking that writes complete child
   sessions.
+- `Replay.search()` for running and ranking multiple fork rollouts from the same
+  recorded step.
 - `defineTools()` for preserving tool argument/result types in `ctx.tools`.
 - `defineHarness()` for preserving harness return types and tool-aware
   `ctx.tools` types without manual generic annotations.
@@ -179,6 +181,63 @@ child with the updated harness code that now produces that forked tail request.
 `events()` and printed by the CLI. Splitting inside concurrent work is
 best-effort because each async lane keeps its own order and the cross-lane split
 is reconstructed from recorded initiation steps.
+
+## Trajectory Search
+
+`Replay.search()` runs repeated forks from one recorded boundary and ranks the
+child sessions with your scorer. Use it for small prompt/model sweeps or sampled
+rollouts when a bad run has a measurable goal.
+
+```ts
+const replay = await AgentRewind.replay(".rewind/support-router", { codec });
+await replay.run(harness);
+
+const search = await replay.search({
+  atStep: 2,
+  harness,
+  model,
+  strategy: "beam",
+  onRolloutError: "continue",
+  budget: { maxRollouts: 3, stopScore: 1 },
+  actions: [
+    { id: "hold", overrides: { system: "Ask for more context." } },
+    { id: "escalate", overrides: { system: "Enterprise exceptions escalate-to-csm." } }
+  ],
+  score: ({ result }) => ({
+    score: String(result).includes("escalate-to-csm") ? 1 : 0,
+    reason: String(result)
+  })
+});
+
+console.log(search.searchPath); // .rewind/searches/<search-id>.json
+```
+
+Supported strategies are `beam`, `monte-carlo`, `ucb`, `mcts`, and
+`alpha-zero`. `budget.maxRollouts`, `budget.maxDepth`, `budget.beamWidth`,
+`budget.explorationWeight`, `budget.puctExploration`, `budget.maxTokens`, and
+`budget.stopScore` bound provider spend. `concurrency`, `signal`, `retry`,
+`rateLimit`, `onRollout`, `onNode`, and `onBest` give operational control for
+longer searches. `best` is the highest single rollout; `bestBranch` can select
+the strongest aggregate branch by `mean`, `lower-confidence-bound`, or
+`pass-rate`. Each rollout is implemented with
+`Replay.fork()`, so every candidate writes a normal child session with recorded
+prefix events and live/stub tail events. Search validates that `atStep` is a
+recorded boundary, records failed rollout nodes when `onRolloutError:
+"continue"` is used, writes a manifest under `<store>/searches/`, and annotates
+child session metadata with the search id, rollout, action sequence, and score.
+Action diagnostics use stable action hashes, so dynamic actions that reuse the
+same id but change prompt/model metadata do not collapse into one branch.
+If an action changes the prompt or model request, replay the winning child with
+harness code that now builds that forked request. See the repository guide
+`docs/trajectory-scoring.md` for detailed scoring strategies, including
+LLM-as-a-judge natural-language scoring. See
+`docs/trajectory-search-strategies.md` for beam search, Monte Carlo search,
+UCB, MCTS, AlphaZero-style PUCT, multi-depth action sequences, priors, and
+budget tuning.
+
+For common cases, import `search` and use `search.promptSweep()`,
+`search.modelSweep()`, `search.regression()`, or `search.judge()` instead of
+hand-building `actions` and `score` every time.
 
 ## Dependencies
 
